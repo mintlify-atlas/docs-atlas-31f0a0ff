@@ -1,0 +1,81 @@
+---
+title: "Privacy Parser: PII extraction as structured spans"
+description: "Privacy Parser extracts PII from text as typed, structured spans — the reverse of OpenAI's Privacy Filter, built on the same 1.5B model."
+---
+
+Privacy Parser is the extraction counterpart to [OpenAI's Privacy Filter](https://github.com/openai/privacy-filter). Where the original model masks PII with `<REDACTED>`, Privacy Parser returns every detected entity as a structured span — label, character offsets, and matched text — so you can audit, analyze, or route it rather than hide it.
+
+The library ships three backends: a pure-regex parser that runs in microseconds with no model weights, a direct model wrapper around the opf 1.5B checkpoint, and a hybrid pipeline that layers the model, span-merging, and regex backstops to achieve F1 0.929 at ~600 ms CPU latency.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Parse your first text and get structured PII spans in under five minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install with uv, pip, or from source — including model weight setup.
+  </Card>
+  <Card title="Choose a backend" icon="layer-group" href="/backends/overview">
+    Compare regex, model, and hybrid backends by speed, accuracy, and use case.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/pii-parser">
+    Full reference for PIIParser, HybridPIIParser, DetectedSpan, and more.
+  </Card>
+  <Card title="PII labels" icon="tags" href="/guides/pii-labels">
+    Explore the 8 PII categories and the opf v2 label taxonomy.
+  </Card>
+  <Card title="CLI usage" icon="terminal" href="/guides/cli-usage">
+    Run Privacy Parser from the command line with JSON, spans, or redacted output.
+  </Card>
+</CardGroup>
+
+## How it works
+
+Privacy Parser wraps the opf 1.5B bidirectional token classifier. The model produces BIOES logits per token; a Viterbi decoder converts those into character spans; and optional post-processing stages merge fragmented adjacent spans and fill gaps with deterministic regex detectors.
+
+```
+text
+  ↓
+opf 1.5B → BIOES logits → Viterbi (tuned) → char spans
+  ↓
+span-merge (glues Quindle + Testwick)
+  ↓
+regex backstop (URL, secret, account — where the model misses)
+  ↓
+spans[]
+```
+
+## Quick example
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(device="cpu")
+result = parser.parse(
+    "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), "
+    "account 40702810500001234567, 14 Beautiful Ct, Anytown USA, "
+    "password Priv4cy-Filt3r-2026."
+)
+for s in result.spans:
+    print(f"{s.label:18}  {s.text}")
+```
+
+```
+private_person      Quindle Testwick
+private_email       quindle.testwick@openai.com
+private_phone       +1-415-555-0102
+account_number      40702810500001234567
+private_address     14 Beautiful Ct, Anytown USA
+secret              Priv4cy-Filt3r-2026
+```
+
+<CardGroup cols={3}>
+  <Card title="PIIParser" icon="bolt" href="/backends/regex-parser">
+    Pure-regex, no weights, microsecond latency, F1 1.000 on deterministic fixtures.
+  </Card>
+  <Card title="ModelPIIParser" icon="brain" href="/backends/model-parser">
+    Raw opf 1.5B output, 500 ms CPU, F1 0.733 on real-world text.
+  </Card>
+  <Card title="HybridPIIParser" icon="shield-check" href="/backends/hybrid-parser">
+    Model + merge + regex backstop, 600 ms CPU, F1 0.929. Recommended for production.
+  </Card>
+</CardGroup>

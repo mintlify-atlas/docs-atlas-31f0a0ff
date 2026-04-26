@@ -1,0 +1,169 @@
+---
+title: "HybridPIIParser: model + merge + regex backstop pipeline"
+description: "HybridPIIParser combines the opf 1.5B model, adjacent span merging, and deterministic regex backstops to reach F1 0.929 at 600 ms CPU latency."
+---
+
+`HybridPIIParser` is Privacy Parser's recommended production backend. It passes text through three sequential stages: the opf 1.5B model for context-aware entity detection, a span-merging step that glues adjacent same-label fragments back together, and a regex backstop layer that fills in `private_url`, `secret`, and `account_number` entities that the model misses or mislabels. The result is F1 0.929 on real-world text at approximately 600 ms CPU latency — about 100 ms more than the bare model, with a substantial accuracy gain.
+
+## Pipeline
+
+```
+text → opf 1.5B → BIOES logits → Viterbi → char spans
+  → span-merge → regex backstop → spans[]
+```
+
+The three stages each address a distinct failure mode of the raw model:
+
+<Steps>
+  <Step title="opf 1.5B model">
+    The model tokenizes the input, produces BIOES logits for each token, and runs a Viterbi decoder to find the globally optimal tag sequence. With the default `enable_viterbi_tuning=True`, two transition biases are applied: `transition_bias_end_to_start: -0.5` discourages immediately starting a new span after one ends, and `transition_bias_inside_to_continue: 0.2` encourages continuing the current span. Both biases reduce fragmentation without merging spans that have genuinely different labels.
+  </Step>
+  <Step title="Span-merge">
+    The BIOES span-decoder faithfully reflects what the model emitted, which means multi-word entities sometimes arrive as two adjacent same-label spans — `Quindle` and `Testwick` as separate `S`-tagged person spans, or `404` and `Nowhere Lane` as separate address fragments. The merge step glues adjacent spans that share the same label and are separated only by a short whitespace or connector gap. Gap caps are label-specific: 3 characters for `private_person`, `private_address`, and `private_date`; 2 for `private_url`, `private_phone`, and `secret`; 1 for `account_number`; 0 for `private_email`.
+  </Step>
+  <Step title="Regex backstop">
+    After merging, the hybrid runs three targeted regex detectors — `detect_urls`, `detect_secrets`, and `detect_accounts` — and merges their output with the model spans. For each regex candidate, the backstop checks whether the model already covers the same character range with the correct label (in which case the model span is kept), a different label (in which case the regex wins only for high-confidence cases: schemed URLs starting with `http://`/`https://`, secrets with a known prefix like `sk-` or `ghp_`, and account numbers that fully contain a model span mislabeled as `private_phone`), or no overlap at all (in which case the regex span is added). Labels not in `_REGEX_BACKSTOP_LABELS` — names, emails, phones, dates, addresses — are never added by the regex layer to avoid introducing noise.
+  </Step>
+</Steps>
+
+## Usage
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(device="cpu")
+result = parser.parse(
+    "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), "
+    "account 40702810500001234567, 14 Beautiful Ct, Anytown USA, "
+    "password Priv4cy-Filt3r-2026."
+)
+for s in result.spans:
+    print(f"{s.label:18}  {s.text}")
+```
+
+```
+private_person      Quindle Testwick
+private_email       quindle.testwick@openai.com
+private_phone       +1-415-555-0102
+account_number      40702810500001234567
+private_address     14 Beautiful Ct, Anytown USA
+secret              Priv4cy-Filt3r-2026
+```
+
+<Tabs>
+  <Tab title="CPU">
+    ```python
+    parser = HybridPIIParser(device="cpu")
+    ```
+    Runs on any machine. Expect approximately 600 ms per document on a modern CPU.
+  </Tab>
+  <Tab title="CUDA">
+    ```python
+    parser = HybridPIIParser(device="cuda")
+    ```
+    Requires CUDA-enabled PyTorch. The model inference step drops to single-digit milliseconds; the merge and regex stages add negligible overhead.
+  </Tab>
+</Tabs>
+
+## Constructor parameters
+
+<ResponseField name="model" type="str | None" default="None">
+  Path or Hugging Face model ID for the checkpoint. When `None`, opf resolves the default checkpoint from `~/.opf/privacy_filter/` or `$OPF_CHECKPOINT`.
+</ResponseField>
+
+<ResponseField name="device" type="'cpu' | 'cuda'" default="'cpu'">
+  Device to run the model on.
+</ResponseField>
+
+<ResponseField name="decode_mode" type="'viterbi' | 'argmax'" default="'viterbi'">
+  Decoding strategy for the opf model. `"viterbi"` finds the globally optimal BIOES tag sequence and is strongly recommended. `"argmax"` picks the highest-probability tag per token independently and can emit invalid sequences.
+</ResponseField>
+
+<ResponseField name="enable_merge" type="bool" default="True">
+  When `True`, adjacent same-label spans separated by a short whitespace or connector gap are merged before the regex backstop runs. Disable to receive raw model spans with only the regex backstop applied.
+</ResponseField>
+
+<ResponseField name="enable_regex_backstop" type="bool" default="True">
+  When `True`, `detect_urls`, `detect_secrets`, and `detect_accounts` are run and their output is used to fill gaps left by the model. Disable to receive only model (and optionally merged) spans.
+</ResponseField>
+
+<ResponseField name="enable_viterbi_tuning" type="bool" default="True">
+  When `True`, applies the built-in Viterbi transition biases (`transition_bias_end_to_start: -0.5`, `transition_bias_inside_to_continue: 0.2`) to reduce span fragmentation. Only has effect when `decode_mode="viterbi"`. Set to `False` to use the opf default Viterbi weights.
+</ResponseField>
+
+## Viterbi tuning biases
+
+The default biases applied when `enable_viterbi_tuning=True` are:
+
+| Bias key | Value | Effect |
+| --- | --- | --- |
+| `transition_bias_end_to_start` | `-0.5` | Lightly discourages ending one span and immediately starting another. Reduces fragmentation of multi-word entities without merging genuinely separate spans. |
+| `transition_bias_inside_to_continue` | `0.2` | Encourages staying inside the current span (I → I or I → E). Strengthens multi-token entities. |
+
+All other transition biases are left at their opf defaults (`0.0`). Spans that have genuinely different labels — for example, a name followed by an email — are unaffected because the label boundary prevents the bias from applying.
+
+## Regex backstop labels
+
+The regex backstop only adds or corrects spans for three labels:
+
+| Label | Regex detector | Rationale |
+| --- | --- | --- |
+| `private_url` | `detect_urls` | Schemed URLs (`http://`, `https://`) are highly structured and frequently mislabeled by the model in short sentences. |
+| `secret` | `detect_secrets` | Known-prefix tokens (`sk-`, `pk-`, `AKIA`, `ghp_`, `gho_`, `xoxb-`, `xoxp-`, `Bearer`) and Word-Word-Word passphrases are deterministically identifiable. |
+| `account_number` | `detect_accounts` | Long digit runs (10–24 digits) are commonly mislabeled as `private_phone`. The backstop corrects cases where the regex span fully contains a `private_phone` model span. |
+
+Labels not in this set — `private_person`, `private_email`, `private_phone`, `private_date`, `private_address` — are never touched by the regex layer. For these categories, the regex would introduce more false positives than the model produces false negatives.
+
+## Result type
+
+`parse()` returns a `HybridParseResult`:
+
+<ResponseField name="text" type="str">
+  The original input string.
+</ResponseField>
+
+<ResponseField name="spans" type="tuple[ParsedSpan, ...]">
+  Non-overlapping entity spans from all three pipeline stages, sorted by start offset.
+</ResponseField>
+
+<ResponseField name="warning" type="str | None">
+  A warning string from opf if the input was truncated or another non-fatal issue occurred; `None` otherwise.
+</ResponseField>
+
+Each element of `spans` is a `ParsedSpan` (the same type used by `ModelPIIParser`):
+
+<ResponseField name="label" type="str">
+  The opf v2 entity category.
+</ResponseField>
+
+<ResponseField name="start" type="int">
+  Start character offset (inclusive) in the original text.
+</ResponseField>
+
+<ResponseField name="end" type="int">
+  End character offset (exclusive) in the original text.
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The matched substring: `original_text[start:end]`.
+</ResponseField>
+
+`HybridParseResult` exposes `to_dict()` and `to_json()` for serialization.
+
+## Module-level convenience function
+
+`parse_hybrid()` uses a module-level cached `HybridPIIParser` instance so you can call it without instantiating the class. The cached instance uses `device="cpu"` and all defaults:
+
+```python
+from pii_parser.hybrid import parse_hybrid
+
+result = parse_hybrid("Send the invoice to billing@acme.com or call +44 20 7946 0958.")
+for s in result.spans:
+    print(s.label, s.text)
+```
+
+The cache is initialized on first call and reused for all subsequent calls in the same process. If you need a non-default configuration (GPU, custom biases, disabled merge), instantiate `HybridPIIParser` directly.
+
+<Tip>
+  `HybridPIIParser` is the backend that achieves F1 0.929 in the benchmark suite. If you are starting a new integration and are unsure which backend to use, start here. You can always swap to `ModelPIIParser` later if you need access to raw model output, or to `PIIParser` if you determine model weights are not practical for your deployment.
+</Tip>

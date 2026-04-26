@@ -1,0 +1,249 @@
+---
+title: "PIIParseResult, HybridParseResult, ModelParseResult"
+description: "Reference for all three result types returned by Privacy Parser backends, including fields, serialization methods, and the summary count structure."
+---
+
+Privacy Parser exposes three result types, one per backend. `PIIParseResult` is returned by the regex-only `PIIParser` and carries schema versioning, a redacted copy of the input, and a per-category span count. `HybridParseResult` and `ModelParseResult` are returned by their respective model-backed parsers; they share the same shape — a tuple of `ParsedSpan` objects and an optional warning string — but carry no redacted text (redaction is not a model-parser concern). All three types are frozen dataclasses with `to_dict()` and `to_json()` methods.
+
+---
+
+## PIIParseResult
+
+Defined in `pii_parser/api.py`. Returned by `PIIParser.parse()` and the module-level `parse()` function.
+
+```python
+from pii_parser import PIIParseResult
+```
+
+<ResponseField name="schema_version" type="int" required>
+  Integer schema version for the result format. Currently always `1`. Increment-stable — consumers can check this to detect breaking changes.
+</ResponseField>
+
+<ResponseField name="text" type="str" required>
+  The original input string, unmodified.
+</ResponseField>
+
+<ResponseField name="detected_spans" type="tuple[DetectedSpan, ...]" required>
+  An immutable tuple of `DetectedSpan` objects, one per detected PII entity, sorted by `start` offset. Overlapping candidates have already been resolved. See [DetectedSpan](/api-reference/detected-span) for field definitions.
+</ResponseField>
+
+<ResponseField name="redacted_text" type="str" required>
+  A copy of `text` with every span replaced by its `placeholder`. Non-overlapping regions are preserved exactly; character offsets in `detected_spans` correspond to positions in `text`, not in `redacted_text`.
+</ResponseField>
+
+<ResponseField name="summary" type="dict" required>
+  A count summary of detected spans.
+
+  <Expandable title="properties">
+    <ResponseField name="span_counts" type="dict[str, int]">
+      Maps each detected label to the number of times it appeared. Only labels that were actually detected are included as keys.
+    </ResponseField>
+    <ResponseField name="total_spans" type="int">
+      Total number of detected spans across all categories. Equal to `sum(span_counts.values())`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### to_dict()
+
+```python
+result.to_dict() -> dict
+```
+
+Returns a plain dictionary with all fields serialised. `detected_spans` is converted to a list of dicts via each span's own `to_dict()`.
+
+```python
+{
+    "schema_version": 1,
+    "summary": {
+        "span_counts": {"private_email": 1, "private_phone": 1},
+        "total_spans": 2
+    },
+    "text": "Call me at (415) 555-0102 or email alice@example.com.",
+    "detected_spans": [
+        {
+            "label": "private_phone",
+            "start": 11,
+            "end": 25,
+            "text": "(415) 555-0102",
+            "placeholder": "<REDACTED>"
+        },
+        {
+            "label": "private_email",
+            "start": 36,
+            "end": 52,
+            "text": "alice@example.com",
+            "placeholder": "<REDACTED>"
+        }
+    ],
+    "redacted_text": "Call me at <REDACTED> or email <REDACTED>."
+}
+```
+
+### to_json()
+
+```python
+result.to_json(*, indent: int | None = 2) -> str
+```
+
+Serialises `to_dict()` output as a JSON string. Non-ASCII characters are preserved (not escaped).
+
+<ParamField path="indent" type="int | None" default="2">
+  JSON indentation level. Pass `None` for compact single-line output.
+</ParamField>
+
+<ResponseField name="return value" type="str">
+  UTF-8 JSON string.
+</ResponseField>
+
+---
+
+## HybridParseResult
+
+Defined in `pii_parser/hybrid.py`. Returned by `HybridPIIParser.parse()` and `parse_hybrid()`.
+
+```python
+from pii_parser.hybrid import HybridParseResult
+```
+
+<ResponseField name="text" type="str" required>
+  The original input string, as passed to the model.
+</ResponseField>
+
+<ResponseField name="spans" type="tuple[ParsedSpan, ...]" required>
+  An immutable tuple of `ParsedSpan` objects sorted by `start` offset, after all pipeline stages (model decode → merge → regex backstop → sort). See [ParsedSpan](/api-reference/detected-span#parsedspan) for field definitions.
+</ResponseField>
+
+<ResponseField name="warning" type="str | None">
+  An optional warning string propagated from the underlying opf model (e.g. truncation warnings for very long inputs). `None` when no warning was issued.
+</ResponseField>
+
+### to_dict()
+
+Returns a plain dictionary. The `"warning"` key is only present when `warning` is not `None`.
+
+```python
+result.to_dict() -> dict
+```
+
+```python
+{
+    "text": "Contact Emily Clarke at emily@corp.io.",
+    "spans": [
+        {"label": "private_person", "start": 8, "end": 20, "text": "Emily Clarke"},
+        {"label": "private_email", "start": 24, "end": 37, "text": "emily@corp.io"}
+    ]
+}
+```
+
+### to_json()
+
+```python
+result.to_json(*, indent: int | None = 2) -> str
+```
+
+<ParamField path="indent" type="int | None" default="2">
+  JSON indentation level. Pass `None` for compact output.
+</ParamField>
+
+<ResponseField name="return value" type="str">
+  UTF-8 JSON string. The `"warning"` key is omitted when `warning` is `None`.
+</ResponseField>
+
+---
+
+## ModelParseResult
+
+Defined in `pii_parser/model_parser.py`. Returned by `ModelPIIParser.parse()`.
+
+```python
+from pii_parser.model_parser import ModelParseResult
+```
+
+<ResponseField name="text" type="str" required>
+  The original input string.
+</ResponseField>
+
+<ResponseField name="spans" type="tuple[ParsedSpan, ...]" required>
+  An immutable tuple of `ParsedSpan` objects — raw model output converted to typed span objects, no postprocessing applied. See [ParsedSpan](/api-reference/detected-span#parsedspan).
+</ResponseField>
+
+<ResponseField name="warning" type="str | None">
+  Optional warning string from the opf model. `None` when no warning was issued.
+</ResponseField>
+
+### to_dict()
+
+```python
+result.to_dict() -> dict
+```
+
+Identical shape to `HybridParseResult.to_dict()`. The `"warning"` key is only included when `warning` is not `None`.
+
+### to_json()
+
+```python
+result.to_json(*, indent: int | None = 2) -> str
+```
+
+<ParamField path="indent" type="int | None" default="2">
+  JSON indentation level.
+</ParamField>
+
+<ResponseField name="return value" type="str">
+  UTF-8 JSON string.
+</ResponseField>
+
+---
+
+## Full serialisation example
+
+```python
+from pii_parser import parse
+import json
+
+text = "Send the report to Jane Doe at jane@example.com by 2026-05-01."
+result = parse(text)
+
+# Pretty-print JSON
+print(result.to_json())
+```
+
+```json
+{
+  "schema_version": 1,
+  "summary": {
+    "span_counts": {
+      "private_person": 1,
+      "private_email": 1,
+      "private_date": 1
+    },
+    "total_spans": 3
+  },
+  "text": "Send the report to Jane Doe at jane@example.com by 2026-05-01.",
+  "detected_spans": [
+    {
+      "label": "private_person",
+      "start": 19,
+      "end": 27,
+      "text": "Jane Doe",
+      "placeholder": "<REDACTED>"
+    },
+    {
+      "label": "private_email",
+      "start": 31,
+      "end": 46,
+      "text": "jane@example.com",
+      "placeholder": "<REDACTED>"
+    },
+    {
+      "label": "private_date",
+      "start": 50,
+      "end": 60,
+      "text": "2026-05-01",
+      "placeholder": "<REDACTED>"
+    }
+  ],
+  "redacted_text": "Send the report to <REDACTED> at <REDACTED> by <REDACTED>."
+}
+```

@@ -1,0 +1,145 @@
+---
+title: "PII label reference: all 8 opf v2 categories explained"
+description: "Privacy Parser uses the opf v2 label taxonomy with 8 PII categories: person, email, phone, address, URL, date, account number, and secret."
+---
+
+Privacy Parser identifies personally identifiable information using the opf v2 label taxonomy — the same eight-category schema used by OpenAI's Privacy Filter model. Every span that the parser detects is assigned exactly one of these labels, giving downstream consumers a consistent, well-defined vocabulary regardless of which backend (regex, model, or hybrid) produced the result.
+
+## Label reference
+
+The table below lists all eight labels, a short description of what each one covers, a representative example value, and the detection approach used by the regex backend.
+
+| Label | Description | Example value | Detection approach |
+|---|---|---|---|
+| `account_number` | Long digit runs that look like financial or system account identifiers | `40702810500001234567` | Uninterrupted digit run of 10–24 digits |
+| `private_address` | Physical street addresses, US-style | `14 Beautiful Ct, Anytown USA` | Street-number + title-cased tokens + recognized suffix |
+| `private_date` | Calendar dates in ISO, US, or prose format | `2026-05-17`, `May 17, 2026` | ISO 8601, M/D[/YYYY], and written month patterns |
+| `private_email` | Email addresses per RFC 5322 practical subset | `alice@example.com` | Local-part + `@` + domain regex with 2–63 char TLD |
+| `private_person` | Human names, optionally with honorifics | `Dr. Jane Doe`, `John Smith` | Capitalized multi-token sequence with stopword filtering |
+| `private_phone` | Telephone numbers with country or area codes | `+1 (415) 555-0102` | Digit groups with separators, 7–15 total digits |
+| `private_url` | Schemed HTTP/HTTPS URLs | `https://portal.example.org/reset` | `https?://` prefix followed by domain and optional path |
+| `secret` | API keys, tokens, and high-entropy passphrases | `ghp_abcdefghijklmnopqrst`, `sk-...` | Well-known token prefixes and Word-Word-Word patterns |
+
+## Detection patterns
+
+Each label has a dedicated detector function in `detectors.py`. The sections below show the core pattern logic for each category.
+
+### `private_email`
+
+The email detector matches the RFC 5322 practical subset: a local part of alphanumeric characters with `._%+-` separators, followed by `@`, a domain, and a TLD of 2–63 characters. A negative lookbehind prevents matching addresses that are already part of a longer token.
+
+```python
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])"
+    r"[A-Za-z0-9](?:[A-Za-z0-9._%+\-]*[A-Za-z0-9])?"
+    r"@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)*"
+    r"\.[A-Za-z]{2,63}"
+)
+```
+
+### `private_url`
+
+Only schemed URLs (those beginning with `http://` or `https://`) are matched. Bare domains are intentionally excluded because they produce too much noise in free-form text. Trailing punctuation characters that the regex may greedily absorb are stripped after matching.
+
+```python
+_URL_RE = re.compile(
+    r"\bhttps?://"
+    r"[A-Za-z0-9.\-]+(?:\.[A-Za-z]{2,63})"
+    r"(?::\d{2,5})?"
+    r"(?:/[^\s<>\"']*)?"
+)
+```
+
+### `private_phone`
+
+Phone detection requires an optional country code, an area code (with or without parentheses), and at least one more digit group. After matching, the raw string is validated: it must contain 7–15 digits total and at least one separator character such as a space, dash, dot, parenthesis, or plus sign. Strings that look like ISO or slash-separated dates are excluded.
+
+```python
+_PHONE_RE = re.compile(
+    r"(?<![\w@/])"
+    r"(?:\+?\d{1,3}[\s\-.]?)?"
+    r"(?:\(\d{1,4}\)[\s\-.]?|\d{1,4}[\s\-.])"
+    r"\d{1,4}[\s\-.]?\d{2,4}"
+    r"(?:[\s\-.]?\d{2,4})?"
+    r"(?!\w)"
+)
+```
+
+### `private_date`
+
+Four date patterns are tried in sequence: ISO 8601 (`YYYY-MM-DD`), US numeric (`M/D` or `M/D/YYYY`), written month before day (`May 17, 2026`), and day before written month (`17 May 2026`). Numeric-only dates without a year are validated to ensure the month is 1–12 and the day is 1–31 to avoid false matches on fractions.
+
+```python
+_DATE_PATTERNS = [
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    re.compile(r"(?<!\d)\d{1,2}[/\-]\d{1,2}(?:[/\-]\d{2,4})?(?!\d)"),
+    re.compile(rf"\b(?:{_MONTHS})\s+\d{{1,2}}(?:,\s*\d{{2,4}})?\b"),
+    re.compile(rf"\b\d{{1,2}}\s+(?:{_MONTHS})(?:\s+\d{{2,4}})?\b"),
+]
+```
+
+### `account_number`
+
+Account numbers are long uninterrupted digit runs — between 10 and 24 digits — not preceded or followed by another digit or a hyphen. This range covers credit card numbers (16 digits), IBAN-style accounts, and common banking identifiers.
+
+```python
+_ACCOUNT_RE = re.compile(r"(?<![\d\-])\d{10,24}(?![\d\-])")
+```
+
+### `secret`
+
+Secret detection matches a set of well-known API token prefixes (`sk-`, `pk-`, `AKIA`, `ghp_`, `gho_`, `xox*`, `Bearer `) plus a generic Word-Word-Word passphrase pattern that requires at least one digit and at least one letter in the sequence.
+
+```python
+_SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{4,}"),
+    re.compile(r"\bpk-[A-Za-z0-9_\-]{4,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgho_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{12,}\b"),
+    re.compile(
+        r"\b(?=[A-Za-z0-9\-]*\d)(?=[A-Za-z0-9\-]*[A-Za-z])"
+        r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+){2,}\b"
+    ),
+]
+```
+
+### `private_person`
+
+Person names are detected as capitalized multi-token sequences. The detector drops stop-words from the start of a match (honorifics, weekdays, month names, common sentence-initial words) and requires at least two remaining tokens. Matches beginning with titles like `Mr`, `Mrs`, `Dr`, or `Prof` are also accepted without the two-token minimum.
+
+### `private_address`
+
+Addresses must begin with a 1–6 digit street number, followed by up to six title-cased tokens, and end with a recognized street suffix (`Street`, `Ave`, `Rd`, `Blvd`, etc.). An optional city and state or country component may follow after a comma.
+
+## Overlap resolution
+
+When two detectors produce spans that overlap the same character range, Privacy Parser resolves the conflict in two steps:
+
+1. **Longer span wins.** The span that covers more characters is kept. A full email address will beat a bare domain fragment that happens to be a substring.
+2. **Priority wins ties.** When two overlapping spans have exactly the same length, the label with the higher `PRIORITY` value wins.
+
+The priority table is defined in `labels.py`:
+
+```python
+PRIORITY = {
+    "private_email": 100,
+    "private_url":   90,
+    "secret":        80,
+    "account_number": 70,
+    "private_phone": 60,
+    "private_date":  50,
+    "private_address": 40,
+    "private_person": 30,
+}
+```
+
+This ordering reflects detection confidence: structured patterns like email addresses and URLs are almost always correct when they match, while heuristic patterns like person names are more likely to conflict with other labels.
+
+<Note>
+The `resolve_overlaps` function in `spans.py` performs conflict resolution. It sorts candidates by start position (longest span first on ties), then walks the list replacing any conflicting entry that is beaten by the incoming span.
+</Note>

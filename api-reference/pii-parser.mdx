@@ -1,0 +1,117 @@
+---
+title: "PIIParser class: parse(), redact(), and parse() reference"
+description: "Complete API reference for PIIParser — placeholder constructor parameter, parse() and redact() methods, and module-level parse() convenience function."
+---
+
+`PIIParser` is the main entry point for regex-based PII extraction. It runs all eight deterministic detectors against your text, resolves any overlapping matches, and returns a structured `PIIParseResult` containing the detected spans, a redacted copy of the original text, and a per-category count summary. Use `PIIParser` when you want fast, dependency-free extraction without loading a neural model — it requires no GPU and no weight downloads.
+
+## PIIParser
+
+### Constructor
+
+```python
+from pii_parser import PIIParser
+
+parser = PIIParser(placeholder="[REMOVED]")
+```
+
+<ParamField path="placeholder" type="str" default='"<REDACTED>"'>
+  The string substituted for every detected span when producing `redacted_text`. Defaults to `<REDACTED>`. You can pass any string, including empty string `""` to silently strip PII, or a label-agnostic token like `[PII]`.
+</ParamField>
+
+---
+
+### parse()
+
+```python
+parser.parse(text: str) -> PIIParseResult
+```
+
+Runs all detectors on `text`, resolves overlapping candidates by preferring longer or higher-priority spans, rehydrates each span's `text` field from the source string, builds the redacted copy, and returns a frozen `PIIParseResult`.
+
+<ParamField path="text" type="str" required>
+  The raw input string to scan. May be any length; all detector patterns operate on the full string in a single pass.
+</ParamField>
+
+<ResponseField name="return value" type="PIIParseResult">
+  A frozen dataclass. See [PIIParseResult](/api-reference/parse-result) for full field documentation.
+</ResponseField>
+
+---
+
+### redact()
+
+```python
+parser.redact(text: str) -> str
+```
+
+Convenience wrapper around `parse()`. Calls `parse(text)` internally and returns only `result.redacted_text`. Useful when you need the cleaned string without retaining the structured span data.
+
+<ParamField path="text" type="str" required>
+  The raw input string to scan and redact.
+</ParamField>
+
+<ResponseField name="return value" type="str">
+  A copy of `text` with every detected span replaced by the parser's configured placeholder.
+</ResponseField>
+
+---
+
+## Module-level parse()
+
+```python
+from pii_parser import parse
+
+result = parse(text)
+```
+
+A module-level convenience function backed by a cached default `PIIParser` instance (placeholder `<REDACTED>`). Equivalent to constructing a `PIIParser()` once and calling `.parse(text)`. The cached instance is created on first call and reused for the lifetime of the process.
+
+<ParamField path="text" type="str" required>
+  The raw input string to scan.
+</ParamField>
+
+<ResponseField name="return value" type="PIIParseResult">
+  Identical structure to `PIIParser.parse()`.
+</ResponseField>
+
+---
+
+## Usage example
+
+```python
+from pii_parser import PIIParser, parse
+
+text = (
+    "Hi, I'm Alice Johnson. Reach me at alice@example.com or "
+    "(415) 555-0102. My card number is 4111111111111111."
+)
+
+# Using the class directly
+parser = PIIParser()
+result = parser.parse(text)
+
+print(result.redacted_text)
+# Hi, I'm <REDACTED>. Reach me at <REDACTED> or <REDACTED>. My card number is <REDACTED>.
+
+print(result.summary)
+# {'span_counts': {'private_person': 1, 'private_email': 1, 'private_phone': 1, 'account_number': 1}, 'total_spans': 4}
+
+for span in result.detected_spans:
+    print(span.label, repr(span.text))
+# private_person 'Alice Johnson'
+# private_email 'alice@example.com'
+# private_phone '(415) 555-0102'
+# account_number '4111111111111111'
+
+# Custom placeholder
+scrubbed = PIIParser(placeholder="***").redact(text)
+# Hi, I'm ***. Reach me at *** or ***. My card number is ***.
+
+# Module-level shorthand (uses cached default parser)
+result2 = parse(text)
+```
+
+<Note>
+  `PIIParser` is fully stateless after construction — the same instance is safe to use from multiple threads concurrently. The placeholder is set at construction time; create separate instances if you need different placeholders for different call sites.
+</Note>

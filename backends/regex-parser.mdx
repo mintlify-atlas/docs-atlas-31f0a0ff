@@ -1,0 +1,124 @@
+---
+title: "PIIParser: regex-only PII extraction, no model weights"
+description: "PIIParser runs pure regex detectors with no model weights, delivering microsecond latency and opf-compatible output with zero external dependencies."
+---
+
+`PIIParser` is the lightest backend in Privacy Parser. It runs eight independent regex detectors — for emails, URLs, phone numbers, dates, account numbers, secrets, person names, and street addresses — and resolves any overlapping matches into a clean list of non-overlapping spans. Because it loads no model weights, startup is instant and parsing throughput is limited only by regex engine speed: typically single-digit microseconds for short documents. Use `PIIParser` when you need high-volume structured PII extraction and the entities in your text have enough structural cues (format, punctuation, known prefixes) that a regex can catch them reliably.
+
+## Basic usage
+
+Instantiate `PIIParser` and call `parse()` with any string. The result is a `PIIParseResult` containing the original text, a tuple of `DetectedSpan` objects, the redacted text, and a summary of span counts.
+
+```python
+from pii_parser import PIIParser
+
+parser = PIIParser()
+result = parser.parse("Alice paid 40702810500001234567 on 2026-05-17.")
+```
+
+`result.detected_spans` is a tuple of `DetectedSpan` objects:
+
+```python
+for span in result.detected_spans:
+    print(span.label, span.start, span.end, span.text)
+# account_number  10  30  40702810500001234567
+# private_date    34  44  2026-05-17
+```
+
+`result.redacted_text` contains the redacted string with each span replaced by its placeholder:
+
+```python
+print(result.redacted_text)
+# Alice paid <REDACTED> on <REDACTED>.
+```
+
+## Custom placeholder
+
+Pass a `placeholder` keyword argument to replace the default `<REDACTED>` with any string:
+
+```python
+parser = PIIParser(placeholder="[PII]")
+result = parser.parse("Contact alice@example.com for support.")
+print(result.redacted_text)
+# Contact [PII] for support.
+```
+
+The placeholder is stored per-span in `DetectedSpan.placeholder`, so mixed-placeholder scenarios are possible if you construct spans manually.
+
+## Methods
+
+### `PIIParser.parse(text)`
+
+Runs all detectors against `text`, resolves overlaps, and returns a `PIIParseResult`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema_version` | `int` | Always `1`. Mirrors the opf output schema version. |
+| `text` | `str` | The original input string. |
+| `detected_spans` | `tuple[DetectedSpan, ...]` | Non-overlapping spans sorted by start offset. |
+| `redacted_text` | `str` | Input with each span replaced by its placeholder. |
+| `summary` | `dict` | `{"span_counts": {label: count, ...}, "total_spans": int}` |
+
+`PIIParseResult` also exposes `to_dict()` and `to_json()` for serialization.
+
+### `PIIParser.redact(text)`
+
+Convenience wrapper that returns only the redacted string:
+
+```python
+redacted = parser.redact("Call +1-415-555-0102 or visit https://example.com")
+# "Call <REDACTED> or visit <REDACTED>"
+```
+
+## Module-level convenience function
+
+`pii_parser.parse()` uses a module-level cached `PIIParser` instance so you can call it without instantiating the class:
+
+```python
+from pii_parser import parse
+
+result = parse("Born on 1990-03-22, SSN account 123456789012.")
+```
+
+The cached instance uses the default `<REDACTED>` placeholder. If you need a custom placeholder, instantiate `PIIParser` directly.
+
+## Overlap resolution
+
+When two detectors produce overlapping spans — for example, a phone detector and an account-number detector both matching the same digit run — `PIIParser` keeps exactly one span using a deterministic priority rule:
+
+1. **Longer span wins.** If one span covers more characters than the other, it is kept regardless of label.
+2. **Higher-priority label wins ties.** When two spans have the same length, the label with the higher priority score wins. Priority order from highest to lowest: `private_email` → `private_url` → `secret` → `account_number` → `private_phone` → `private_date` → `private_address` → `private_person`.
+
+The resolution runs in a single pass over spans sorted by start offset, so it is deterministic and stable: among equal-priority, equal-length spans, the earlier-positioned span wins.
+
+<Note>
+  Overlap resolution only affects cases where two detectors match overlapping character ranges. Detectors are run independently and do not communicate with each other. If you find a specific overlap case being resolved incorrectly, check the priority table in `pii_parser/labels.py`.
+</Note>
+
+## Detectors reference
+
+`PIIParser` dispatches to the following detectors from `pii_parser.detectors`, in this order:
+
+| Detector | Label | Notes |
+| --- | --- | --- |
+| `detect_emails` | `private_email` | RFC 5322 practical subset; TLD 2–63 chars. |
+| `detect_urls` | `private_url` | Schemed URLs only (`http://`, `https://`). Trailing punctuation stripped. |
+| `detect_accounts` | `account_number` | Digit runs of 10–24 digits not adjacent to other digits or hyphens. |
+| `detect_phones` | `private_phone` | Requires ≥ 7 and ≤ 15 digits with at least one separator; ISO dates excluded. |
+| `detect_dates` | `private_date` | ISO 8601, US slash/dash, prose month names, weekday + short date. |
+| `detect_secrets` | `secret` | `sk-`, `pk-`, `AKIA`, `ghp_`, `gho_`, `xoxb-`/`xoxp-`, `Bearer`, and Word-Word-Word passphrases. |
+| `detect_addresses` | `private_address` | US-style street addresses with a recognised suffix (Street, Ave, Rd, …). |
+| `detect_persons` | `private_person` | Capitalised multi-token names; title prefixes (Mr, Dr, …) accepted; stop-words filtered. |
+
+You can import and call individual detectors directly if you need only a subset:
+
+```python
+from pii_parser.detectors import detect_emails, detect_secrets
+
+for span in detect_emails("Send to bob@example.org"):
+    print(span)
+```
+
+<Warning>
+  `detect_persons` is a heuristic. It matches capitalised multi-word sequences and applies a stop-word list to reduce false positives, but it will still miss names that are all-lowercase or in non-Latin scripts, and it may match sentence-initial capitalised words that are not names. For name detection in free-form text, use `HybridPIIParser` instead.
+</Warning>

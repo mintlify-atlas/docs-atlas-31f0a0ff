@@ -1,0 +1,298 @@
+---
+title: "Detector functions: detect_emails, run_all, and more"
+description: "Reference for all eight regex detector functions and run_all() — each accepts a string and yields DetectedSpan objects for one PII category."
+---
+
+Privacy Parser's regex layer is built from eight independent detector functions, each responsible for a single PII category. Every function accepts a raw string and yields `DetectedSpan` objects; none of them call each other or share state, so they can be used individually or composed freely. Overlap resolution is intentionally a downstream concern — detectors emit all candidates they find, and `resolve_overlaps()` (called by `PIIParser.parse()`) decides which wins when two detectors match the same region. The `run_all()` dispatch function collects output from all eight detectors into a single list.
+
+---
+
+## detect_emails()
+
+```python
+from pii_parser.detectors import detect_emails
+
+for span in detect_emails(text):
+    print(span)
+```
+
+```python
+detect_emails(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches RFC 5322 practical-subset email addresses. The local part allows alphanumerics, dots, percent, plus, and hyphen. The domain must end with a TLD of 2–63 letters. A negative lookbehind prevents matching addresses that are already part of a longer token.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_email"`. Example matches: `alice@example.com`, `user.name+tag@sub.domain.org`.
+</ResponseField>
+
+---
+
+## detect_phones()
+
+```python
+from pii_parser.detectors import detect_phones
+
+for span in detect_phones(text):
+    print(span)
+```
+
+```python
+detect_phones(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches phone numbers in common international and North American formats. Candidates must contain 7–15 digits total and include at least one phone separator (space, parenthesis, dot, plus, or hyphen). Strings that match ISO or slash-separated date patterns are excluded to avoid false positives.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_phone"`. Example matches: `(415) 555-0102`, `+1 999 555-1234`, `+44 20 7946 0958`. Leading and trailing whitespace and punctuation (`,`, `.`, `;`, `:`, `)`) are stripped from the matched text before yielding.
+</ResponseField>
+
+<Note>
+  The phone detector intentionally excludes bare digit runs (e.g. `4155550102`) to avoid colliding with account number detection. If a number contains no separators it will not be yielded here.
+</Note>
+
+---
+
+## detect_urls()
+
+```python
+from pii_parser.detectors import detect_urls
+
+for span in detect_urls(text):
+    print(span)
+```
+
+```python
+detect_urls(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches schemed HTTP and HTTPS URLs only. Bare domain names are excluded by design — they are too ambiguous in free text, and the opf ground truth also uses schemed URLs for the `private_url` category. Trailing punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `}`, `"`, `'`) is stripped from the matched text.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_url"`. Example matches: `https://corp.io/support`, `http://internal.example.com:8080/path`.
+</ResponseField>
+
+---
+
+## detect_dates()
+
+```python
+from pii_parser.detectors import detect_dates
+
+for span in detect_dates(text):
+    print(span)
+```
+
+```python
+detect_dates(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches dates in four formats: ISO 8601 (`2026-05-17`), US numeric (`5/23`, `12/31/2025`, `5-23`), prose month-first (`May 17, 2026`), and prose day-first (`17 May 2026`). Numeric-only candidates without a year are validated to ensure month is 1–12 and day is 1–31 before yielding.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_date"`. Example matches: `2026-04-30`, `April 30, 2026`, `30 April 2026`, `4/30/2026`.
+</ResponseField>
+
+---
+
+## detect_accounts()
+
+```python
+from pii_parser.detectors import detect_accounts
+
+for span in detect_accounts(text):
+    print(span)
+```
+
+```python
+detect_accounts(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches long unbroken digit runs of 10–24 digits that are not adjacent to another digit or a hyphen. Covers credit card numbers, bank account numbers, and similar structured numeric identifiers.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="account_number"`. Example matches: `4111111111111111` (16-digit card), `123456789012` (12-digit account).
+</ResponseField>
+
+---
+
+## detect_secrets()
+
+```python
+from pii_parser.detectors import detect_secrets
+
+for span in detect_secrets(text):
+    print(span)
+```
+
+```python
+detect_secrets(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches token-shaped secrets using eight patterns covering common API key prefixes and high-entropy passphrases. The patterns are applied independently; a single string may produce multiple overlapping candidates (resolved downstream).
+
+| Pattern | Example |
+|---|---|
+| `sk-[A-Za-z0-9_\-]{4,}` | `sk-abc123XYZdef` |
+| `pk-[A-Za-z0-9_\-]{4,}` | `pk-live-XYZ` |
+| `AKIA[0-9A-Z]{16}` | `AKIAIOSFODNN7EXAMPLE` |
+| `ghp_[A-Za-z0-9]{20,}` | `ghp_abcdefghijklmnopqrst` |
+| `gho_[A-Za-z0-9]{20,}` | `gho_abcdefghijklmnopqrst` |
+| `xox[baprs]-[A-Za-z0-9\-]{10,}` | `xoxb-12345-abcde` |
+| `Bearer [A-Za-z0-9._\-]{12,}` | `Bearer eyJhbGciOiJIUzI1` |
+| Word-Word-Word passphrase with digit | `correct-horse-Battery3` |
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="secret"`.
+</ResponseField>
+
+---
+
+## detect_addresses()
+
+```python
+from pii_parser.detectors import detect_addresses
+
+for span in detect_addresses(text):
+    print(span)
+```
+
+```python
+detect_addresses(text: str) -> Iterator[DetectedSpan]
+```
+
+Matches US-style street addresses in the form `<number> <Title-Cased-Street> <suffix>[, City[, State|Country]]`. Recognised suffixes include Street, Avenue, Road, Boulevard, Drive, Court, Lane, Way, Place, Plaza, Square, Terrace, Parkway, Circle, Highway, and Trail (with common abbreviations). Trailing punctuation (`.`, `,`, `;`) is stripped.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_address"`. Example matches: `123 Main Street`, `456 Oak Ave, Springfield, IL`.
+</ResponseField>
+
+---
+
+## detect_persons()
+
+```python
+from pii_parser.detectors import detect_persons
+
+for span in detect_persons(text):
+    print(span)
+```
+
+```python
+detect_persons(text: str) -> Iterator[DetectedSpan]
+```
+
+Heuristic detector for capitalized multi-token person names, with optional honorific prefix (`Mr`, `Mrs`, `Ms`, `Dr`, `Mx`, `Prof`) and name particles (`de`, `van`, `von`, `del`, `della`, `la`, `le`, `bin`, `ibn`, `al`). Single-token candidates are discarded. A stop-word list prevents common sentence-initial words, weekday names, month names, and country abbreviations from being included.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="yields" type="DetectedSpan">
+  Spans with `label="private_person"`. Example matches: `Alice Johnson`, `Dr. Emily Clarke`, `Jean-Pierre van den Berg`. False-positive rate is higher than other detectors; consider using `HybridPIIParser` for more accurate person detection.
+</ResponseField>
+
+<Note>
+  `detect_persons()` is intentionally heuristic. For high-quality person name detection, use `HybridPIIParser`, which relies on the opf model for `private_person` and does not apply a regex backstop for this category.
+</Note>
+
+---
+
+## run_all()
+
+```python
+from pii_parser.detectors import run_all
+
+spans = run_all(text)
+```
+
+```python
+run_all(text: str) -> list[DetectedSpan]
+```
+
+Dispatches `text` through all eight detectors in order and collects results into a single flat list. The list may contain overlapping candidates; call `resolve_overlaps()` to deduplicate before use.
+
+The dispatch order is: `detect_emails`, `detect_urls`, `detect_accounts`, `detect_phones`, `detect_dates`, `detect_secrets`, `detect_addresses`, `detect_persons`.
+
+<ParamField path="text" type="str" required>
+  The string to scan.
+</ParamField>
+
+<ResponseField name="return value" type="list[DetectedSpan]">
+  All candidate spans from all detectors. Not sorted; may contain overlaps.
+</ResponseField>
+
+---
+
+## ALL_DETECTORS
+
+```python
+from pii_parser.detectors import ALL_DETECTORS
+```
+
+A tuple containing all eight detector callables in dispatch order. Useful for iterating over detectors programmatically or for building custom pipelines that skip specific categories.
+
+```python
+ALL_DETECTORS: tuple = (
+    detect_emails,
+    detect_urls,
+    detect_accounts,
+    detect_phones,
+    detect_dates,
+    detect_secrets,
+    detect_addresses,
+    detect_persons,
+)
+```
+
+---
+
+## Example: calling a single detector
+
+```python
+from pii_parser.detectors import detect_emails, detect_secrets
+
+text = "API key sk-abc123XYZ is linked to admin@example.com."
+
+emails = list(detect_emails(text))
+print(emails)
+# [DetectedSpan(label='private_email', start=33, end=51, text='admin@example.com', placeholder='<REDACTED>')]
+
+secrets = list(detect_secrets(text))
+print(secrets)
+# [DetectedSpan(label='secret', start=8, end=21, text='sk-abc123XYZ', placeholder='<REDACTED>')]
+```
+
+---
+
+## Design principle: independence and downstream resolution
+
+Each detector is self-contained and emits all spans it can find without knowledge of what other detectors will produce. This means two detectors can match the same region — for example, `detect_emails` and `detect_urls` will both fire on `https://user@example.com`. Callers are responsible for resolving these overlaps. `PIIParser.parse()` does this automatically via `resolve_overlaps()`; if you call detectors directly, apply `resolve_overlaps()` to the collected list before further processing.

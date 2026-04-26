@@ -1,0 +1,97 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Privacy Parser",
+  "projectDescription": "A Python library that uses the OpenAI Privacy Filter's 1.5B model to extract PII as structured spans instead of masking it, providing three backends from pure-regex to full model-backed hybrid parsing.",
+  "theme": "luma",
+  "primaryColor": "#6366F1",
+  "lightColor": "#EEF2FF",
+  "darkColor": "#312E81",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Backends",
+            "pages": [
+              "backends/overview",
+              "backends/regex-parser",
+              "backends/model-parser",
+              "backends/hybrid-parser"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/pii-labels",
+              "guides/cli-usage",
+              "guides/output-formats",
+              "guides/benchmarks"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api-reference/pii-parser",
+              "api-reference/hybrid-pii-parser",
+              "api-reference/model-pii-parser",
+              "api-reference/detected-span",
+              "api-reference/parse-result"
+            ]
+          },
+          {
+            "group": "Detectors",
+            "pages": [
+              "api-reference/detectors"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Three parsing backends: pure-regex (PIIParser), model-backed (ModelPIIParser), and hybrid (HybridPIIParser)",
+    "OpenAI Privacy Filter (opf) compatible output schema — same label taxonomy, same span shape",
+    "8 PII label categories: private_person, private_email, private_phone, private_address, private_url, private_date, account_number, secret",
+    "Hybrid pipeline: opf 1.5B model + BIOES/Viterbi decoding + span-merge + regex backstop",
+    "CLI interface with JSON, spans, and redacted output modes",
+    "Zero-dependency regex backend (no model weights required)",
+    "F1 score of 0.929 with Hybrid backend at ~600ms CPU latency"
+  ],
+  "publicApiSurface": [
+    "PIIParser(placeholder=...) — regex-based parser class",
+    "PIIParser.parse(text) -> PIIParseResult",
+    "PIIParser.redact(text) -> str",
+    "PIIParseResult.detected_spans: tuple[DetectedSpan, ...]",
+    "PIIParseResult.redacted_text: str",
+    "PIIParseResult.to_dict() -> dict",
+    "PIIParseResult.to_json(indent=2) -> str",
+    "DetectedSpan(label, start, end, text, placeholder)",
+    "parse(text) -> PIIParseResult — module-level convenience",
+    "HybridPIIParser(device, decode_mode, enable_merge, enable_regex_backstop, enable_viterbi_tuning)",
+    "HybridPIIParser.parse(text) -> HybridParseResult",
+    "HybridParseResult.spans: tuple[ParsedSpan, ...]",
+    "ModelPIIParser(model, device, decode_mode, output_mode, viterbi_biases)",
+    "ModelPIIParser.parse(text) -> ModelParseResult",
+    "parse_hybrid(text) -> HybridParseResult — module-level convenience",
+    "detect_emails(text), detect_phones(text), detect_urls(text), detect_dates(text), detect_accounts(text), detect_secrets(text), detect_addresses(text), detect_persons(text)",
+    "run_all(text) -> list[DetectedSpan]",
+    "resolve_overlaps(spans) -> list[DetectedSpan]",
+    "merge_adjacent_spans(spans, text) -> list[ParsedSpan]",
+    "pii-parser CLI — python -m pii_parser",
+    "pii-parser-model CLI — python -m pii_parser.cli_model"
+  ]
+}

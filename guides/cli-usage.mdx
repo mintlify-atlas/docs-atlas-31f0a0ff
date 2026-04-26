@@ -1,0 +1,229 @@
+---
+title: "Run Privacy Parser from the command line (CLI guide)"
+description: "Use pii-parser or python -m pii_parser to extract PII spans from the terminal with JSON, tab-separated spans, and redacted output modes."
+---
+
+Privacy Parser ships two separate command-line interfaces. The first, `pii-parser` (also invocable as `python -m pii_parser`), uses the fast regex backend and supports all three output modes including redaction. The second, `pii-parser-model` (also invocable as `python -m pii_parser.cli_model`), uses the neural model backend and is suited for higher-accuracy extraction where latency is less critical. Both CLIs accept input as a positional argument, a file path, or piped stdin.
+
+<Tabs>
+  <Tab title="pii-parser (regex)">
+
+## `pii-parser` — regex backend
+
+The regex CLI runs the pattern-based `PIIParser` backend. It returns results in under a millisecond and requires no model weights.
+
+### Arguments
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `text` | positional, optional | — | Input text. Omit to use `-f` or stdin. |
+| `-f` / `--file` | string | — | Path to a file to read input from. |
+| `--mode` | `json` \| `redacted` \| `spans` | `json` | Output format. |
+| `--placeholder` | string | `<REDACTED>` | Replacement marker used in `redacted` mode. |
+| `--indent` | integer | `2` | JSON indentation spaces. Use `0` for compact output. |
+
+### Output modes
+
+<CodeGroup>
+
+```bash JSON output (default)
+pii-parser "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```bash Redacted text
+pii-parser --mode redacted "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```bash TSV spans
+pii-parser --mode spans "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```bash Read from file
+pii-parser --file message.txt --mode json
+```
+
+```bash Pipe from stdin
+cat message.txt | pii-parser --mode redacted
+```
+
+</CodeGroup>
+
+### Example: JSON mode
+
+```bash
+pii-parser "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```json
+{
+  "schema_version": 1,
+  "summary": {
+    "span_counts": {
+      "private_email": 1,
+      "private_phone": 1
+    },
+    "total_spans": 2
+  },
+  "text": "Contact alice@example.com or call +1 (415) 555-0198.",
+  "detected_spans": [
+    {
+      "label": "private_email",
+      "start": 8,
+      "end": 25,
+      "text": "alice@example.com",
+      "placeholder": "<REDACTED>"
+    },
+    {
+      "label": "private_phone",
+      "start": 34,
+      "end": 51,
+      "text": "+1 (415) 555-0198",
+      "placeholder": "<REDACTED>"
+    }
+  ],
+  "redacted_text": "Contact <REDACTED> or call <REDACTED>."
+}
+```
+
+### Example: Redacted mode
+
+```bash
+pii-parser --mode redacted "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```
+Contact <REDACTED> or call <REDACTED>.
+```
+
+Use `--placeholder` to customize the replacement token:
+
+```bash
+pii-parser --mode redacted --placeholder "[PII]" "Contact alice@example.com."
+```
+
+```
+Contact [PII].
+```
+
+### Example: Spans mode
+
+Spans mode outputs one span per line as tab-separated values: `label`, `start`, `end`, `text`.
+
+```bash
+pii-parser --mode spans "Contact alice@example.com or call +1 (415) 555-0198."
+```
+
+```
+private_email	8	25	alice@example.com
+private_phone	34	51	+1 (415) 555-0198
+```
+
+  </Tab>
+  <Tab title="pii-parser-model (neural)">
+
+## `pii-parser-model` — model backend
+
+The model CLI runs the `ModelPIIParser` backend, which uses the opf 1.5B neural model for context-aware extraction. It does not support `redacted` mode because the model output uses `ParsedSpan` objects without a placeholder field.
+
+<Warning>
+The first run downloads the opf 1.5B checkpoint (~3 GB) to `~/.opf/privacy_filter/`. Subsequent runs load from the local cache.
+</Warning>
+
+### Arguments
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `text` | positional, optional | — | Input text. Omit to use `-f` or stdin. |
+| `-f` / `--file` | string | — | Path to a file to read input from. |
+| `--device` | `cpu` \| `cuda` | `cpu` | Device to run inference on. |
+| `--model` | string | — | Path to a custom checkpoint directory. Overrides `OPF_CHECKPOINT`. |
+| `--mode` | `json` \| `spans` | `json` | Output format. |
+| `--indent` | integer | `2` | JSON indentation spaces. Use `0` for compact output. |
+
+### Output modes
+
+<CodeGroup>
+
+```bash JSON output (default)
+pii-parser-model "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```bash TSV spans
+pii-parser-model --mode spans "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```bash GPU inference
+pii-parser-model --device cuda "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```bash Custom checkpoint
+pii-parser-model --model /path/to/checkpoint "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```bash Pipe from stdin
+cat message.txt | pii-parser-model --mode spans
+```
+
+</CodeGroup>
+
+### Example: JSON mode
+
+```bash
+pii-parser-model "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```json
+{
+  "text": "Alice paid account 4532015112830366 on 2026-05-17.",
+  "spans": [
+    {
+      "label": "private_person",
+      "start": 0,
+      "end": 5,
+      "text": "Alice"
+    },
+    {
+      "label": "account_number",
+      "start": 18,
+      "end": 34,
+      "text": "4532015112830366"
+    },
+    {
+      "label": "private_date",
+      "start": 38,
+      "end": 48,
+      "text": "2026-05-17"
+    }
+  ]
+}
+```
+
+### Example: Spans mode
+
+```bash
+pii-parser-model --mode spans "Alice paid account 4532015112830366 on 2026-05-17."
+```
+
+```
+private_person	0	5	Alice
+account_number	18	34	4532015112830366
+private_date	38	48	2026-05-17
+```
+
+  </Tab>
+</Tabs>
+
+## Choosing a CLI
+
+<CardGroup cols={2}>
+  <Card title="pii-parser" icon="bolt">
+    Use when you need sub-millisecond throughput, no GPU, and redaction output. Best for batch processing logs or structured data fields.
+  </Card>
+  <Card title="pii-parser-model" icon="brain">
+    Use when accuracy matters more than speed. The neural backend handles ambiguous, conversational, or multilingual text better than patterns alone.
+  </Card>
+</CardGroup>
+
+<Tip>
+For the best combination of accuracy and speed, use the `HybridPIIParser` Python API directly. The hybrid backend (model + span-merge + regex backstop) achieves F1 0.929 on the opf benchmark suite, compared to 0.733 for the model alone.
+</Tip>

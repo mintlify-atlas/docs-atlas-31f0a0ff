@@ -1,0 +1,169 @@
+---
+title: "DetectedSpan, ParsedSpan, and span utility functions"
+description: "Reference for DetectedSpan and ParsedSpan — span objects returned by all three backends — plus resolve_overlaps() and merge_adjacent_spans()."
+---
+
+Every backend in Privacy Parser represents a single detected PII entity as a span object: a small frozen dataclass holding the entity's category label, its character offsets in the source string, and the matched text. The regex backend (`PIIParser`) uses `DetectedSpan`, which carries an additional `placeholder` field used during redaction. The model backend (`ModelPIIParser`, `HybridPIIParser`) uses the simpler `ParsedSpan`. Both types expose a `to_dict()` method for serialisation.
+
+---
+
+## DetectedSpan
+
+Defined in `pii_parser/spans.py`. Produced by all eight regex detector functions and returned as elements of `PIIParseResult.detected_spans`.
+
+```python
+from pii_parser import DetectedSpan
+
+span = DetectedSpan(
+    label="private_email",
+    start=10,
+    end=27,
+    text="alice@example.com",
+    placeholder="<REDACTED>",
+)
+```
+
+<ResponseField name="label" type="str" required>
+  PII category. One of: `account_number`, `private_address`, `private_date`, `private_email`, `private_person`, `private_phone`, `private_url`, `secret`.
+</ResponseField>
+
+<ResponseField name="start" type="int" required>
+  Zero-based character index of the first character of the span in the source string.
+</ResponseField>
+
+<ResponseField name="end" type="int" required>
+  Zero-based character index one past the last character of the span. `source[start:end]` reproduces `text`.
+</ResponseField>
+
+<ResponseField name="text" type="str" required>
+  The substring of the source string that was matched. For spans returned by `PIIParser.parse()` this is always exactly `source[start:end]`, rehydrated after overlap resolution.
+</ResponseField>
+
+<ResponseField name="placeholder" type="str">
+  The string that replaces this span during redaction. Defaults to `<REDACTED>`. Set at parser construction time via `PIIParser(placeholder=...)`.
+</ResponseField>
+
+### to_dict()
+
+```python
+span.to_dict() -> dict
+```
+
+Returns a plain dictionary suitable for JSON serialisation.
+
+<ResponseField name="return value" type="dict">
+  <Expandable title="properties">
+    <ResponseField name="label" type="str">Category label.</ResponseField>
+    <ResponseField name="start" type="int">Start character offset.</ResponseField>
+    <ResponseField name="end" type="int">End character offset (exclusive).</ResponseField>
+    <ResponseField name="text" type="str">Matched substring.</ResponseField>
+    <ResponseField name="placeholder" type="str">Redaction placeholder.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## ParsedSpan
+
+Defined in `pii_parser/model_parser.py`. Produced by `ModelPIIParser` and `HybridPIIParser`, and returned as elements of `ModelParseResult.spans` and `HybridParseResult.spans`.
+
+```python
+from pii_parser.model_parser import ParsedSpan
+
+span = ParsedSpan(
+    label="private_person",
+    start=0,
+    end=9,
+    text="Bob Smith",
+)
+```
+
+<ResponseField name="label" type="str" required>
+  PII category label assigned by the opf model. Same eight-label taxonomy as `DetectedSpan` when `output_mode="typed"`.
+</ResponseField>
+
+<ResponseField name="start" type="int" required>
+  Zero-based character index of the first character of the span.
+</ResponseField>
+
+<ResponseField name="end" type="int" required>
+  Zero-based character index one past the last character of the span.
+</ResponseField>
+
+<ResponseField name="text" type="str" required>
+  The matched substring of the source string.
+</ResponseField>
+
+### to_dict()
+
+```python
+span.to_dict() -> dict
+```
+
+<ResponseField name="return value" type="dict">
+  <Expandable title="properties">
+    <ResponseField name="label" type="str">Category label.</ResponseField>
+    <ResponseField name="start" type="int">Start character offset.</ResponseField>
+    <ResponseField name="end" type="int">End character offset (exclusive).</ResponseField>
+    <ResponseField name="text" type="str">Matched substring.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Difference between DetectedSpan and ParsedSpan
+
+| Feature | `DetectedSpan` | `ParsedSpan` |
+|---|---|---|
+| Backend | Regex (`PIIParser`) | Model (`ModelPIIParser`, `HybridPIIParser`) |
+| `placeholder` field | Yes — used for redaction | No |
+| `to_dict()` keys | `label`, `start`, `end`, `text`, `placeholder` | `label`, `start`, `end`, `text` |
+| Immutable | Yes (`frozen=True`) | Yes (`frozen=True`) |
+
+---
+
+## resolve_overlaps()
+
+Defined in `pii_parser/spans.py`. Used internally by `PIIParser.parse()` to eliminate duplicate or overlapping regex candidates before building the final result.
+
+```python
+from pii_parser.spans import resolve_overlaps
+
+clean = resolve_overlaps(spans)
+```
+
+<ParamField path="spans" type="list[DetectedSpan]" required>
+  An unsorted list of `DetectedSpan` objects, potentially containing overlapping candidates from different detectors.
+</ParamField>
+
+<ResponseField name="return value" type="list[DetectedSpan]">
+  A new list with all overlaps resolved, sorted by `start` offset. When two spans overlap, the longer one is kept. Ties in length are broken by label priority (`private_email` > `private_url` > `secret` > `account_number` > `private_phone` > `private_date` > `private_address` > `private_person`).
+</ResponseField>
+
+---
+
+## merge_adjacent_spans()
+
+Defined in `pii_parser/postprocess.py`. Used internally by `HybridPIIParser` to join same-label model spans that are adjacent or separated by a small connector gap.
+
+```python
+from pii_parser.postprocess import merge_adjacent_spans
+
+merged = merge_adjacent_spans(spans, text)
+```
+
+<ParamField path="spans" type="Iterable[ParsedSpan]" required>
+  An iterable of `ParsedSpan` objects. Does not need to be sorted.
+</ParamField>
+
+<ParamField path="text" type="str" required>
+  The original source string. Used to rehydrate the `text` field of merged spans.
+</ParamField>
+
+<ResponseField name="return value" type="list[ParsedSpan]">
+  A new list sorted by `start` offset. Adjacent same-label spans are merged when the gap between them contains only whitespace or connector characters (space, tab, `.`, `-`, `,`, `/`) and is within the per-label maximum: 3 chars for `private_person`, `private_address`, `private_date`; 2 chars for `private_url`, `private_phone`, `secret`; 1 char for `account_number`; 0 chars for `private_email`.
+</ResponseField>
+
+<Note>
+  `merge_adjacent_spans()` operates on `ParsedSpan` objects only. It is not used by the regex backend (`PIIParser`), which resolves overlaps with `resolve_overlaps()` instead.
+</Note>

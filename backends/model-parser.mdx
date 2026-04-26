@@ -1,0 +1,187 @@
+---
+title: "ModelPIIParser: raw opf 1.5B model span extraction"
+description: "ModelPIIParser wraps the OpenAI Privacy Filter 1.5B checkpoint to classify PII tokens with Viterbi decoding and return structured spans without masking."
+---
+
+`ModelPIIParser` is a thin wrapper around the [OpenAI Privacy Filter](https://github.com/openai/privacy-filter) 1.5B token-classifier checkpoint. Where the original `opf` library redacts PII by replacing it with `<REDACTED>`, `ModelPIIParser` skips the redaction step and hands back structured spans — label, character offsets, and matched text — using the same BIOES logits and Viterbi decoder. The result shares the opf v2 label taxonomy (`private_person`, `private_email`, `private_phone`, `private_address`, `private_url`, `private_date`, `account_number`, `secret`), so output from `ModelPIIParser` is directly comparable to opf's own `detected_spans`.
+
+<Warning>
+  The first time you construct a `ModelPIIParser` (or any model-backed backend), the opf checkpoint is downloaded from the internet — approximately 3 GB — and cached to `~/.opf/privacy_filter/`. Subsequent instantiations load from disk. Set the `OPF_CHECKPOINT` environment variable to change the cache location.
+</Warning>
+
+## Installation
+
+`ModelPIIParser` depends on the `opf` package from the OpenAI Privacy Filter repository. Install both packages before using this backend:
+
+```bash
+uv pip install -e ./privacy-filter
+uv pip install -e ./pii_parser
+```
+
+## Basic usage
+
+```python
+from pii_parser.model_parser import ModelPIIParser
+
+parser = ModelPIIParser(device="cpu")
+result = parser.parse("Contact Alice Smith at alice@example.com")
+
+for span in result.spans:
+    print(span.label, span.text)
+# private_person  Alice Smith
+# private_email   alice@example.com
+```
+
+<Tabs>
+  <Tab title="CPU">
+    ```python
+    parser = ModelPIIParser(device="cpu")
+    ```
+    Runs on any machine with sufficient RAM. Expect approximately 500 ms per document on a modern CPU.
+  </Tab>
+  <Tab title="CUDA">
+    ```python
+    parser = ModelPIIParser(device="cuda")
+    ```
+    Runs on an NVIDIA GPU. Requires CUDA-enabled PyTorch. Latency drops to single-digit milliseconds on a T4 or better.
+  </Tab>
+</Tabs>
+
+## Constructor parameters
+
+<ResponseField name="model" type="str | None" default="None">
+  Path or Hugging Face model ID for the checkpoint. When `None`, opf resolves the default checkpoint from `~/.opf/privacy_filter/` or `$OPF_CHECKPOINT`.
+</ResponseField>
+
+<ResponseField name="device" type="'cpu' | 'cuda'" default="'cpu'">
+  Device to run the model on. Pass `"cuda"` to use a GPU.
+</ResponseField>
+
+<ResponseField name="decode_mode" type="'viterbi' | 'argmax'" default="'viterbi'">
+  Token-level decoding strategy. See [Viterbi vs argmax](#viterbi-vs-argmax) below.
+</ResponseField>
+
+<ResponseField name="output_mode" type="'typed' | 'redacted'" default="'typed'">
+  Controls whether spans retain their category label (`"typed"`) or are collapsed to a single `"redacted"` label. The default `"typed"` is almost always what you want — `"redacted"` discards the label information that makes a parser useful.
+</ResponseField>
+
+<ResponseField name="viterbi_biases" type="dict | None" default="None">
+  Optional calibration biases for the Viterbi decoder. Only applied when `decode_mode="viterbi"`. See [Viterbi calibration](#viterbi-calibration) below.
+</ResponseField>
+
+## Viterbi vs argmax
+
+`decode_mode` controls how the model converts per-token BIOES logits into spans.
+
+**`"viterbi"` (default):** Finds the globally optimal BIOES tag sequence using the Viterbi algorithm and transition biases. This prevents impossible tag sequences (for example, `I` following `O`) and produces more coherent multi-token spans.
+
+**`"argmax"`:** Picks the highest-probability tag independently for each token. Faster, but can emit structurally invalid sequences that the Viterbi decoder would reject.
+
+For most use cases, keep the default `"viterbi"`. Use `"argmax"` only if you are measuring raw model confidence per token or need a speed comparison baseline.
+
+## Viterbi calibration
+
+The Viterbi decoder accepts a set of six transition bias values that nudge the decoder toward or away from certain tag transitions. You can pass these as a dictionary to `viterbi_biases`:
+
+```python
+parser = ModelPIIParser(
+    device="cpu",
+    decode_mode="viterbi",
+    viterbi_biases={
+        "transition_bias_end_to_start": -0.5,
+        "transition_bias_inside_to_continue": 0.2,
+    },
+)
+```
+
+Any keys you omit default to `0.0`. The full set of accepted keys is:
+
+| Key | Effect |
+| --- | --- |
+| `transition_bias_background_stay` | Bias for staying in the background (non-entity) state. |
+| `transition_bias_background_to_start` | Bias for starting a new span from background. |
+| `transition_bias_inside_to_continue` | Bias for continuing the current span (I → I or I → E). |
+| `transition_bias_inside_to_end` | Bias for ending the current span. |
+| `transition_bias_end_to_background` | Bias for returning to background after a span ends. |
+| `transition_bias_end_to_start` | Bias for immediately starting a new span after one ends. |
+
+Internally, `ModelPIIParser` writes these biases to a temporary JSON calibration file in the opf calibration format and passes it to `OPF.set_viterbi_decoder()`.
+
+<Note>
+  The `HybridPIIParser` applies a pre-tuned set of Viterbi biases by default (`transition_bias_end_to_start: -0.5`, `transition_bias_inside_to_continue: 0.2`). If you want those same biases without the hybrid post-processing stages, pass them directly to `ModelPIIParser` via `viterbi_biases`.
+</Note>
+
+## Result type
+
+`parse()` returns a `ModelParseResult`:
+
+<ResponseField name="text" type="str">
+  The original input string, as returned by opf.
+</ResponseField>
+
+<ResponseField name="spans" type="tuple[ParsedSpan, ...]">
+  Non-overlapping entity spans, sorted by start offset.
+</ResponseField>
+
+<ResponseField name="warning" type="str | None">
+  A warning string from opf if the input was truncated or another non-fatal issue occurred; `None` otherwise.
+</ResponseField>
+
+Each element of `spans` is a `ParsedSpan`:
+
+<ResponseField name="label" type="str">
+  The opf v2 entity category: one of `private_person`, `private_email`, `private_phone`, `private_address`, `private_url`, `private_date`, `account_number`, or `secret`.
+</ResponseField>
+
+<ResponseField name="start" type="int">
+  Start character offset (inclusive) in the original text.
+</ResponseField>
+
+<ResponseField name="end" type="int">
+  End character offset (exclusive) in the original text.
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The matched substring: `original_text[start:end]`.
+</ResponseField>
+
+Both `ModelParseResult` and `ParsedSpan` expose `to_dict()` and `to_json()` for serialization.
+
+## Serialization
+
+```python
+import json
+
+result = parser.parse("Meet Bob at 42 Oak Street, Springfield.")
+print(result.to_json())
+```
+
+```json
+{
+  "text": "Meet Bob at 42 Oak Street, Springfield.",
+  "spans": [
+    {
+      "label": "private_person",
+      "start": 5,
+      "end": 8,
+      "text": "Bob"
+    },
+    {
+      "label": "private_address",
+      "start": 12,
+      "end": 37,
+      "text": "42 Oak Street, Springfield."
+    }
+  ]
+}
+```
+
+## Limitations
+
+`ModelPIIParser` produces raw model output without any post-processing. Known failure modes include:
+
+- **Fragmented multi-token names.** The model sometimes emits `Quindle` and `Testwick` as two separate `S`-tagged spans instead of one. `HybridPIIParser` fixes this with span-merging.
+- **Mislabeled account numbers.** Long digit runs are occasionally classified as `private_phone`. `HybridPIIParser`'s regex backstop corrects this.
+- **Missed structured secrets and URLs.** In short, low-context sentences the model occasionally misses `sk-*`, `ghp_*`, and schemed URLs. The hybrid regex backstop adds these back.
+
+If these failure modes affect your use case, use `HybridPIIParser` instead.

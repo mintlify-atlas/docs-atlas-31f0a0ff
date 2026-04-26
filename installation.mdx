@@ -1,0 +1,111 @@
+---
+title: "Install Privacy Parser and configure the checkpoint"
+description: "Install Privacy Parser with uv or pip and configure the opf 1.5B checkpoint path for model-backed backends. Python 3.10+ required."
+---
+
+Installing Privacy Parser involves two steps: installing the Python packages and, if you plan to use the model-backed backends, letting the opf 1.5B checkpoint download on first run. The pure-regex backend (`PIIParser`) works immediately after the package install with no additional setup. `ModelPIIParser` and `HybridPIIParser` require the opf checkpoint, which is fetched automatically the first time you import them. This page covers both install methods and explains how to control where the checkpoint is stored.
+
+## Prerequisites
+
+- Python 3.10 or later
+- `uv` (recommended) or `pip`
+- The `privacy-filter` source repository cloned alongside `pii_parser`
+
+## Install the packages
+
+Both `privacy-filter` (the opf model library) and `pii_parser` must be installed from source. Choose the method that fits your workflow.
+
+<CodeGroup>
+
+```bash uv
+uv venv
+uv pip install -e ./privacy-filter
+uv pip install -e ./pii_parser
+```
+
+```bash pip
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -e ./privacy-filter
+pip install -e ./pii_parser
+```
+
+</CodeGroup>
+
+Both commands install in editable mode (`-e`), so local changes to either package are reflected immediately without reinstalling.
+
+## Regex-only vs model-backed setup
+
+<Tabs>
+  <Tab title="Regex only (PIIParser)">
+    `PIIParser` runs entirely on deterministic regex patterns. It needs no model weights, has microsecond latency, and achieves F1 1.000 on deterministic fixtures.
+
+    After installing the packages you can use it immediately:
+
+    ```python
+    from pii_parser import PIIParser
+
+    parser = PIIParser()
+    result = parser.parse("Call Alice at +1-415-555-0199.")
+    for s in result.detected_spans:
+        print(s.label, s.text)
+    ```
+
+    No model download, no GPU, no extra configuration required.
+  </Tab>
+  <Tab title="Model-backed (ModelPIIParser / HybridPIIParser)">
+    `ModelPIIParser` and `HybridPIIParser` wrap the opf 1.5B bidirectional token classifier. The checkpoint is downloaded automatically on the first import.
+
+    <Note>
+      The first run downloads approximately 3 GB of model weights to `~/.opf/privacy_filter/`. Ensure you have sufficient disk space and a stable internet connection before importing either class for the first time.
+    </Note>
+
+    ```python
+    from pii_parser.hybrid import HybridPIIParser
+
+    # Triggers the checkpoint download on first call
+    parser = HybridPIIParser(device="cpu")
+    result = parser.parse("Contact bob@example.com for details.")
+    ```
+
+    Subsequent imports load the cached weights and skip the download.
+  </Tab>
+</Tabs>
+
+## Configure the checkpoint location
+
+By default, the opf checkpoint is stored in `~/.opf/privacy_filter/`. To use a different path — for example, on a larger disk or a shared network volume — set the `OPF_CHECKPOINT` environment variable before importing the parser:
+
+```bash
+export OPF_CHECKPOINT=/data/models/opf
+```
+
+```python
+import os
+os.environ["OPF_CHECKPOINT"] = "/data/models/opf"
+
+from pii_parser.hybrid import HybridPIIParser
+parser = HybridPIIParser(device="cpu")
+```
+
+The environment variable must be set before the first import of `ModelPIIParser` or `HybridPIIParser` in a given Python process.
+
+## Verify the installation
+
+Run a quick sanity check to confirm everything is working:
+
+```python
+import pii_parser
+print(pii_parser.__version__)   # 0.1.0
+
+from pii_parser import PIIParser
+result = PIIParser().parse("My email is test@example.com.")
+print(result.detected_spans[0].label)  # private_email
+```
+
+If you see `0.1.0` and `private_email`, the install is complete.
+
+## Next steps
+
+- Follow the [quickstart](/quickstart) to parse your first text with `HybridPIIParser`.
+- Read [choosing a backend](/backends/overview) to decide which parser fits your latency and accuracy requirements.

@@ -1,0 +1,123 @@
+---
+title: "HybridPIIParser class and parse_hybrid() reference"
+description: "Complete API reference for HybridPIIParser — all constructor options for model path, device, decode mode, and pipeline stage enable/disable toggles."
+---
+
+`HybridPIIParser` combines the context-aware entity detection of the OpenAI Privacy Filter (opf) model with a set of deterministic regex backstops and a span-merge pass. The pipeline runs in three stages: first the model produces raw per-token spans; then adjacent same-label spans separated by a small gap are merged into single entities (fixing fragmented names and addresses); finally, regex detectors for URLs, secrets, and account numbers fill in categories the model tends to miss or mislabel. Use `HybridPIIParser` when accuracy matters more than speed and you can afford the one-time model download.
+
+## HybridPIIParser
+
+### Constructor
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(
+    model=None,
+    device="cpu",
+    decode_mode="viterbi",
+    enable_merge=True,
+    enable_regex_backstop=True,
+    enable_viterbi_tuning=True,
+)
+```
+
+<ParamField path="model" type="str | None" default="None">
+  Path or HuggingFace Hub identifier for the opf checkpoint. When `None` the default checkpoint is resolved by the underlying `opf` library (downloaded to `~/.opf/privacy_filter` on first use, or the path in `$OPF_CHECKPOINT`).
+</ParamField>
+
+<ParamField path="device" type='"cpu" | "cuda"' default='"cpu"'>
+  Torch device to load the model on. Use `"cuda"` if a GPU is available to significantly reduce per-call latency on long documents.
+</ParamField>
+
+<ParamField path="decode_mode" type='"viterbi" | "argmax"' default='"viterbi"'>
+  Decoding strategy for the BIOES token classifier. `"viterbi"` enforces valid tag sequences and produces cleaner span boundaries; `"argmax"` is faster but may produce invalid transitions. Viterbi tuning biases (see `enable_viterbi_tuning`) are only applied when this is `"viterbi"`.
+</ParamField>
+
+<ParamField path="enable_merge" type="bool" default="True">
+  When `True`, stage 1 of the pipeline runs `merge_adjacent_spans()` to join same-label spans separated by a short whitespace or connector gap. Disable this if the model output is already clean or if you want to inspect raw model spans.
+</ParamField>
+
+<ParamField path="enable_regex_backstop" type="bool" default="True">
+  When `True`, stage 2 adds regex-detected `private_url`, `secret`, and `account_number` spans that the model missed or mislabeled. Only these three categories are backstopped — for `private_person`, `private_phone`, `private_email`, and `private_date`, the model's judgment is trusted over regex.
+</ParamField>
+
+<ParamField path="enable_viterbi_tuning" type="bool" default="True">
+  When `True` (and `decode_mode="viterbi"`), a calibration file is written with pre-set biases that discourage immediately ending a span and starting a new one (`transition_bias_end_to_start: -0.5`) and lightly encourage continuing an open span (`transition_bias_inside_to_continue: 0.2`). These defaults reduce entity fragmentation. Set to `False` to use the model's unmodified Viterbi decoder.
+</ParamField>
+
+---
+
+### parse()
+
+```python
+parser.parse(text: str) -> HybridParseResult
+```
+
+Runs the full hybrid pipeline against `text` and returns a `HybridParseResult` with all resolved spans sorted by start offset.
+
+<ParamField path="text" type="str" required>
+  The raw input string to scan.
+</ParamField>
+
+<ResponseField name="return value" type="HybridParseResult">
+  A frozen dataclass. See [HybridParseResult](/api-reference/parse-result#hybridparseresult) for full field documentation.
+</ResponseField>
+
+---
+
+## Module-level parse_hybrid()
+
+```python
+from pii_parser.hybrid import parse_hybrid
+
+result = parse_hybrid(text)
+```
+
+A module-level convenience function backed by a lazily initialised default `HybridPIIParser` instance (all constructor defaults, `device="cpu"`). The instance is created on first call and cached for the process lifetime.
+
+<ParamField path="text" type="str" required>
+  The raw input string to scan.
+</ParamField>
+
+<ResponseField name="return value" type="HybridParseResult">
+  Identical structure to `HybridPIIParser.parse()`.
+</ResponseField>
+
+---
+
+## Usage example
+
+```python
+from pii_parser.hybrid import HybridPIIParser, parse_hybrid
+
+text = (
+    "Contact Dr. Emily Clarke at emily.clarke@corp.io or visit "
+    "https://corp.io/support. API key: sk-abc123XYZ789."
+)
+
+# Default hybrid pipeline (CPU, Viterbi, all stages enabled)
+parser = HybridPIIParser()
+result = parser.parse(text)
+
+for span in result.spans:
+    print(f"{span.label:20s} [{span.start}:{span.end}]  {span.text!r}")
+# private_person       [8:20]   'Emily Clarke'
+# private_email        [24:44]  'emily.clarke@corp.io'
+# private_url          [55:78]  'https://corp.io/support'
+# secret               [89:104] 'sk-abc123XYZ789'
+
+# GPU inference, argmax decoding, no regex backstop
+fast_parser = HybridPIIParser(
+    device="cuda",
+    decode_mode="argmax",
+    enable_regex_backstop=False,
+)
+
+# Module-level shorthand
+result2 = parse_hybrid(text)
+```
+
+<Note>
+  The first call to `HybridPIIParser()` or `parse_hybrid()` triggers a model download of approximately 3 GB into `~/.opf/privacy_filter` (or the path in `$OPF_CHECKPOINT`). Subsequent calls reuse the cached weights.
+</Note>

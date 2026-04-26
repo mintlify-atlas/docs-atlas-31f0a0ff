@@ -1,0 +1,135 @@
+---
+title: "ModelPIIParser class: device, decode mode, Viterbi biases"
+description: "Complete API reference for ModelPIIParser — constructor parameters for device, decode mode, output mode, and Viterbi calibration bias dictionary."
+---
+
+`ModelPIIParser` is a thin wrapper around the OpenAI Privacy Filter (opf) 1.5-billion-parameter bidirectional token classifier. Where the opf library's own API returns a masked string, `ModelPIIParser` skips the redaction step and hands back structured `ParsedSpan` objects — the same label, start, end, and text the model produced, wrapped in a typed `ModelParseResult`. Use `ModelPIIParser` when you want direct access to the model's raw span output, without the regex backstop and span-merge logic of `HybridPIIParser`.
+
+## ModelPIIParser
+
+### Constructor
+
+```python
+from pii_parser.model_parser import ModelPIIParser
+
+parser = ModelPIIParser(
+    model=None,
+    device="cpu",
+    decode_mode="viterbi",
+    output_mode="typed",
+    viterbi_biases=None,
+)
+```
+
+<ParamField path="model" type="str | None" default="None">
+  Path or HuggingFace Hub identifier for the opf checkpoint. When `None` the opf library resolves the default checkpoint, downloading weights (~3 GB) to `~/.opf/privacy_filter` on first use. Set `$OPF_CHECKPOINT` to point at a pre-downloaded directory.
+</ParamField>
+
+<ParamField path="device" type='"cpu" | "cuda"' default='"cpu"'>
+  Torch device for model inference. Use `"cuda"` to offload to GPU and reduce latency on large volumes of text.
+</ParamField>
+
+<ParamField path="decode_mode" type='"viterbi" | "argmax"' default='"viterbi"'>
+  BIOES decoding strategy. `"viterbi"` enforces valid tag-sequence constraints (B → I → E, S alone, etc.) and produces cleaner span boundaries at the cost of slightly higher per-call overhead. `"argmax"` picks the highest-probability tag at each position independently — faster, but may emit invalid sequences. Viterbi biases (see `viterbi_biases`) are only applied when this is `"viterbi"`.
+</ParamField>
+
+<ParamField path="output_mode" type='"typed" | "redacted"' default='"typed"'>
+  Controls how the opf model reports labels. `"typed"` preserves the full eight-category taxonomy (`private_email`, `private_person`, etc.). `"redacted"` collapses all categories to a single `"redacted"` label, losing category information. The default `"typed"` is almost always what you want for a parser.
+</ParamField>
+
+<ParamField path="viterbi_biases" type="dict | None" default="None">
+  A dictionary of scalar log-probability adjustments applied to the Viterbi transition matrix. Only active when `decode_mode="viterbi"`. All six keys listed below must be present; missing keys default to `0.0`.
+
+  <Expandable title="required keys">
+    <ResponseField name="transition_bias_background_stay" type="float">
+      Bias for staying in the background (non-entity) state.
+    </ResponseField>
+    <ResponseField name="transition_bias_background_to_start" type="float">
+      Bias for transitioning from background to the start of a new span.
+    </ResponseField>
+    <ResponseField name="transition_bias_inside_to_continue" type="float">
+      Bias for continuing an open span (I → I). Positive values encourage longer spans.
+    </ResponseField>
+    <ResponseField name="transition_bias_inside_to_end" type="float">
+      Bias for closing an open span (I → E).
+    </ResponseField>
+    <ResponseField name="transition_bias_end_to_background" type="float">
+      Bias for returning to background after closing a span.
+    </ResponseField>
+    <ResponseField name="transition_bias_end_to_start" type="float">
+      Bias for immediately opening a new span after closing one. Negative values reduce entity fragmentation.
+    </ResponseField>
+  </Expandable>
+
+  Example — discourage fragmentation, encourage longer spans:
+
+  ```python
+  viterbi_biases={
+      "transition_bias_background_stay": 0.0,
+      "transition_bias_background_to_start": 0.0,
+      "transition_bias_inside_to_continue": 0.2,
+      "transition_bias_inside_to_end": 0.0,
+      "transition_bias_end_to_background": 0.0,
+      "transition_bias_end_to_start": -0.5,
+  }
+  ```
+</ParamField>
+
+---
+
+### parse()
+
+```python
+parser.parse(text: str) -> ModelParseResult
+```
+
+Passes `text` through the opf model, converts the resulting `RedactionResult` spans into `ParsedSpan` objects, and returns a `ModelParseResult`. No redaction, no regex postprocessing — purely the model's view of the text.
+
+<ParamField path="text" type="str" required>
+  The raw input string to classify.
+</ParamField>
+
+<ResponseField name="return value" type="ModelParseResult">
+  A frozen dataclass. See [ModelParseResult](/api-reference/parse-result#modelparseresult) for full field documentation.
+</ResponseField>
+
+---
+
+## Usage example
+
+```python
+from pii_parser.model_parser import ModelPIIParser
+
+text = "Send the invoice to Bob Smith at bob@example.com by 2026-04-30."
+
+# Default: CPU, Viterbi, typed labels
+parser = ModelPIIParser()
+result = parser.parse(text)
+
+for span in result.spans:
+    print(f"{span.label:20s} {span.text!r}")
+# private_person       'Bob Smith'
+# private_email        'bob@example.com'
+# private_date         '2026-04-30'
+
+if result.warning:
+    print("Warning:", result.warning)
+
+# Custom Viterbi biases to reduce fragmentation
+tuned = ModelPIIParser(
+    decode_mode="viterbi",
+    viterbi_biases={
+        "transition_bias_background_stay": 0.0,
+        "transition_bias_background_to_start": 0.0,
+        "transition_bias_inside_to_continue": 0.2,
+        "transition_bias_inside_to_end": 0.0,
+        "transition_bias_end_to_background": 0.0,
+        "transition_bias_end_to_start": -0.5,
+    },
+)
+result2 = tuned.parse(text)
+```
+
+<Note>
+  The first instantiation of `ModelPIIParser` triggers a one-time download of the opf checkpoint (~3 GB) into `~/.opf/privacy_filter`. Set the environment variable `OPF_CHECKPOINT` to redirect the download location. Subsequent calls reuse the cached weights.
+</Note>

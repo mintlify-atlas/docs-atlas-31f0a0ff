@@ -1,81 +1,81 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: install and extract PII spans in minutes"
+description: "Install Privacy Parser and extract your first structured PII spans from text using the regex or hybrid backend in under five minutes."
 ---
 
-## Get started in three steps
+This quickstart walks you through installing Privacy Parser, importing the recommended backend, parsing a string of text, and inspecting the structured spans that come back. By the end you will have a working script that identifies names, emails, phone numbers, addresses, account numbers, and secrets in a single call. If you want to compare all three backends before diving in, see [choosing a backend](/backends/overview). For detailed install options, see the [installation guide](/installation).
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Install the library">
+    Install Privacy Parser and its `privacy-filter` dependency using `uv`. Both packages must be installed from source.
 
-### Step 1: Set up your local environment
+    ```bash
+    uv venv
+    uv pip install -e ./privacy-filter
+    uv pip install -e ./pii_parser
+    ```
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Note>
+      The first time you import `ModelPIIParser` or `HybridPIIParser`, the opf 1.5B checkpoint (~3 GB) is downloaded automatically to `~/.opf/privacy_filter/`. The download only happens once. If you only need the regex backend (`PIIParser`), no model weights are required. See [installation](/installation) for details.
+    </Note>
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Import the hybrid parser">
+    `HybridPIIParser` is the recommended backend. It combines the opf model with span-merging and regex backstops to reach F1 0.929 at roughly 600 ms on CPU.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```python
+    from pii_parser.hybrid import HybridPIIParser
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    parser = HybridPIIParser(device="cpu")
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    Pass `device="cuda"` if you have a GPU available.
+  </Step>
 
-### Step 3: Go live
+  <Step title="Parse a text string">
+    Call `parser.parse()` with any string. It returns a `HybridParseResult` whose `spans` attribute holds all detected entities.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```python
+    result = parser.parse(
+        "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), "
+        "account 40702810500001234567, 14 Beautiful Ct, Anytown USA, "
+        "password Priv4cy-Filt3r-2026."
+    )
+    ```
+  </Step>
 
-## Next steps
+  <Step title="Inspect the detected spans">
+    Each span in `result.spans` has a `label`, a `text` field, and character offsets (`start`, `end`).
 
-Now that you have your docs running, explore these key features:
+    ```python
+    for s in result.spans:
+        print(f"{s.label:18}  {s.text}")
+    ```
 
-<CardGroup cols={2}>
+    Expected output:
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    ```text
+    private_person      Quindle Testwick
+    private_email       quindle.testwick@openai.com
+    private_phone       +1-415-555-0102
+    account_number      40702810500001234567
+    private_address     14 Beautiful Ct, Anytown USA
+    secret              Priv4cy-Filt3r-2026
+    ```
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    The spans are sorted by character position. You can also serialize the full result to JSON:
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    ```python
+    print(result.to_json())
+    ```
+  </Step>
+</Steps>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+## What's next
 
-</CardGroup>
+You have a working parser. From here you can:
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+- Read [choosing a backend](/backends/overview) to understand when to use `PIIParser`, `ModelPIIParser`, or `HybridPIIParser`.
+- See the [PII labels guide](/guides/pii-labels) for the full opf v2 taxonomy of 8 categories.
+- Explore the [CLI usage guide](/guides/cli-usage) to run Privacy Parser from the terminal without writing any Python.
+- Browse the [API reference](/api-reference/pii-parser) for the full `HybridPIIParser`, `PIIParser`, and `DetectedSpan` signatures.

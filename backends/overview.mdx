@@ -1,0 +1,51 @@
+---
+title: "Compare PIIParser, ModelPIIParser, and HybridPIIParser"
+description: "Compare Privacy Parser's three backends — regex, model, and hybrid — by speed, accuracy, and resource requirements to pick the right fit."
+---
+
+Privacy Parser ships three backends with different trade-offs between speed, accuracy, and infrastructure requirements. The pure-regex `PIIParser` runs entirely in memory with no model weights; `ModelPIIParser` wraps the opf 1.5B checkpoint directly, returning raw model output as structured spans; and `HybridPIIParser` layers the model with span-merging and deterministic regex backstops to reach the highest real-world accuracy. Choosing the right backend depends on your latency budget, whether you can load a 1.5B parameter model, and how much false-negative risk you can tolerate.
+
+## Backend comparison
+
+| Backend | Weights | Speed | F1 |
+| --- | --- | --- | --- |
+| `PIIParser` | none | µs | 1.000 |
+| `ModelPIIParser` | 1.5B | 500 ms CPU | 0.733 |
+| `HybridPIIParser` | 1.5B | 600 ms CPU | 0.929 |
+
+F1 scores are measured against the opf fixture suite. `PIIParser` scores 1.000 on deterministic regex fixtures but will miss entities that require linguistic context; `HybridPIIParser`'s 0.929 reflects real-world text where names, addresses, and mixed formats appear.
+
+## When to use each backend
+
+<CardGroup cols={3}>
+  <Card title="PIIParser" icon="bolt" href="/backends/regex-parser">
+    **No weights, microsecond latency.** Use when you need to redact or extract well-structured PII — emails, phone numbers, account numbers, URLs, dates, secrets — from high-throughput pipelines where loading a model is not acceptable. Not suitable for free-form names or addresses without structural cues.
+  </Card>
+  <Card title="ModelPIIParser" icon="brain" href="/backends/model-parser">
+    **Raw opf output, 500 ms CPU.** Use when you want direct access to the model's predictions without the hybrid post-processing stages — for example, to build your own merging logic, calibrate biases, or compare model output against other detectors.
+  </Card>
+  <Card title="HybridPIIParser" icon="shield-check" href="/backends/hybrid-parser">
+    **Model + merge + regex backstop, 600 ms CPU.** Use for production workloads where accuracy matters more than the extra 100 ms over the raw model. Covers the cases the model alone misses — structured secrets, schemed URLs, and long account numbers — while keeping context-aware name and address detection.
+  </Card>
+</CardGroup>
+
+## Decision guide
+
+<Steps>
+  <Step title="Check your latency budget">
+    If you need sub-millisecond throughput — for example, inline redaction in a request handler or a high-volume log scrubber — use `PIIParser`. It has zero startup cost and no GPU or large-memory requirements.
+  </Step>
+  <Step title="Assess your entity types">
+    If your text contains free-form personal names, street addresses, or entities that only make sense in context, the regex backend will miss them. You need `ModelPIIParser` or `HybridPIIParser`.
+  </Step>
+  <Step title="Decide whether to load model weights">
+    Both model-backed backends require a first-run download of approximately 3 GB of weights to `~/.opf/privacy_filter/`. If your deployment environment cannot reach the internet or cannot allocate that storage, use `PIIParser`.
+  </Step>
+  <Step title="Choose model or hybrid">
+    If you need the highest accuracy with minimal configuration, use `HybridPIIParser`. If you need raw model spans for custom post-processing or bias calibration experiments, start with `ModelPIIParser` and build on top.
+  </Step>
+</Steps>
+
+<Tip>
+  For most production use cases, start with `HybridPIIParser`. It combines the model's contextual understanding with span-merging and regex backstops for `private_url`, `secret`, and `account_number` — the three categories where the bare model most often fails or mislabels. The additional 100 ms over `ModelPIIParser` is negligible for the accuracy gain.
+</Tip>

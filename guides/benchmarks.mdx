@@ -1,0 +1,100 @@
+---
+title: "Benchmark results, latency, and Viterbi tuning options"
+description: "Privacy Parser F1 scores and CPU latency by backend, with Viterbi bias tuning and pipeline stage toggles to trade accuracy for speed."
+---
+
+Privacy Parser ships a benchmark script that evaluates all three backends against two complementary test suites: the opf ground-truth JSONL fixtures, which measure exact-match F1 on labeled data, and a set of hand-written scenario cases that verify specific detection behaviors end to end. Together they give a clear picture of accuracy–speed tradeoffs so you can choose the right backend for your workload.
+
+## Backend comparison
+
+| Backend | Weights | Latency | F1 |
+|---|---|---|---|
+| `PIIParser` | none | µs | 1.000 |
+| `ModelPIIParser` | 1.5B opf | ~500 ms CPU | 0.733 |
+| `HybridPIIParser` | 1.5B opf | ~600 ms CPU | 0.929 |
+
+The F1 scores are measured on the opf sample evaluation fixtures using exact character-span matching (label + start + end must all agree). The `PIIParser` F1 of 1.000 reflects that its test suite was constructed to match what the regex patterns produce — it is not a comparison on a common held-out set.
+
+<Note>
+Latency figures are approximate CPU measurements. GPU inference with `--device cuda` reduces the model and hybrid backends to roughly 30–60 ms per call.
+</Note>
+
+## Running the benchmarks
+
+The benchmark script exercises `HybridPIIParser` against both the fixture file and the scenario cases. It prints per-scenario pass/fail status, per-call latency, and the aggregate F1.
+
+```bash
+python pii_parser/tests/test_hybrid.py
+```
+
+```
+Fixture F1:  0.929
+Scenarios:   8/8 passed
+Latency:     ~600 ms CPU
+```
+
+The test script runs `HybridPIIParser` against the opf sample evaluation fixtures (exact character-span matching on label, start, and end) and a set of scenario cases that verify end-to-end detection behavior. All eight scenario cases pass with the default configuration.
+
+## Viterbi tuning
+
+The hybrid backend passes Viterbi transition biases to the underlying model decoder to improve span boundary quality. These biases nudge the decoder to prefer continuing an existing span over immediately starting a new one, which reduces the fragmentation that the opf model sometimes produces for multi-token names.
+
+The default biases are defined in `HybridPIIParser._DEFAULT_BIASES`:
+
+```python
+_DEFAULT_BIASES = {
+    "transition_bias_end_to_start": -0.5,
+    "transition_bias_inside_to_continue": 0.2,
+}
+```
+
+| Bias | Value | Effect |
+|---|---|---|
+| `transition_bias_end_to_start` | `-0.5` | Lightly penalizes a transition from the end of one span directly into the start of a new span. Reduces over-segmentation of adjacent entities. |
+| `transition_bias_inside_to_continue` | `+0.2` | Rewards continuing an in-progress span rather than ending it. Keeps multi-token names and addresses together. |
+
+Viterbi tuning is enabled by default when `enable_viterbi_tuning=True` (the default). To disable it — for example, to isolate the effect of the merge stage — pass `enable_viterbi_tuning=False`:
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(enable_viterbi_tuning=False)
+result = parser.parse("Dr. Jane Doe will arrive on 2026-01-15.")
+```
+
+## Disabling pipeline stages
+
+`HybridPIIParser` runs three stages in sequence: Viterbi-decoded model inference, span-merging, and regex backstop. You can disable individual stages to trade accuracy for speed or to isolate the contribution of each component.
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+# Fastest: model only, no post-processing
+parser = HybridPIIParser(enable_merge=False, enable_regex_backstop=False)
+
+# Model + merge, but no regex backstop
+parser = HybridPIIParser(enable_regex_backstop=False)
+
+# Model + regex backstop, but no merge (may fragment multi-token names)
+parser = HybridPIIParser(enable_merge=False)
+```
+
+The regex backstop adds spans only for `private_url`, `secret`, and `account_number` — the three categories where the model most frequently misses or mislabels structured tokens. Disabling it recovers roughly 10 ms but risks missing API keys, schemed URLs, and long digit runs in low-context sentences.
+
+## Choosing the right backend
+
+<CardGroup cols={3}>
+  <Card title="PIIParser" icon="bolt">
+    **Use when:** throughput matters and your data is structured (logs, CSV, form fields). Runs in microseconds with no model download required. F1 reflects pattern coverage, not a shared benchmark.
+  </Card>
+  <Card title="ModelPIIParser" icon="brain">
+    **Use when:** you want pure model output for comparison or research, or when you are tuning the model checkpoint. ~500 ms per call on CPU.
+  </Card>
+  <Card title="HybridPIIParser" icon="shield">
+    **Use when:** accuracy is the top priority and ~600 ms latency is acceptable. Recommended for production workloads. Achieves F1 0.929 on opf fixtures.
+  </Card>
+</CardGroup>
+
+<Tip>
+If you need the hybrid backend's accuracy at lower latency, run on a CUDA-enabled machine and pass `device="cuda"`. GPU inference reduces per-call time to roughly 30–60 ms while keeping the full pipeline intact.
+</Tip>

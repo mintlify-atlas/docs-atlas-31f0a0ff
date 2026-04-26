@@ -1,0 +1,277 @@
+---
+title: "PIIParseResult and HybridParseResult field reference"
+description: "Privacy Parser returns PIIParseResult and HybridParseResult with typed spans, redacted text, and summary counts — both support to_dict() and to_json()."
+---
+
+Every Privacy Parser backend returns a typed result object that wraps the original text alongside a tuple of detected spans, a redacted copy of the text, and a summary of span counts. The regex and hybrid backends return different result types because the hybrid backend does not perform redaction itself — it exposes model-detected spans for downstream consumers to handle. Both result types support `to_dict()` and `to_json()` for serialization.
+
+<Tabs>
+  <Tab title="PIIParseResult">
+
+## `PIIParseResult`
+
+`PIIParseResult` is returned by `PIIParser.parse()` (the regex backend). It is a frozen dataclass defined in `api.py`.
+
+```python
+from pii_parser.api import PIIParser
+
+parser = PIIParser()
+result = parser.parse("Contact alice@example.com or call +1 (415) 555-0198.")
+```
+
+### Fields
+
+<ResponseField name="schema_version" type="int">
+  Schema version of the result. Currently always `1`. Consumers can use this to detect breaking changes in future releases.
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The original input text, unmodified.
+</ResponseField>
+
+<ResponseField name="detected_spans" type="tuple[DetectedSpan, ...]">
+  An ordered tuple of detected PII spans, sorted by `start` position. Each span carries its label, character offsets, matched text, and the placeholder used for redaction. Overlapping spans have already been resolved before this field is populated.
+</ResponseField>
+
+<ResponseField name="redacted_text" type="str">
+  A copy of the input text where every detected span has been replaced by its `placeholder` value. By default the placeholder is `<REDACTED>`, but you can customize it when constructing `PIIParser`.
+</ResponseField>
+
+<ResponseField name="summary" type="dict">
+  A summary dictionary with two keys:
+  - `span_counts` — a `dict[str, int]` mapping each label to the number of spans found
+  - `total_spans` — the total count across all labels
+</ResponseField>
+
+### `DetectedSpan` fields
+
+<ResponseField name="label" type="str">
+  One of the eight opf v2 labels: `account_number`, `private_address`, `private_date`, `private_email`, `private_person`, `private_phone`, `private_url`, or `secret`.
+</ResponseField>
+
+<ResponseField name="start" type="int">
+  Zero-based character index of the first character of the span in the original text.
+</ResponseField>
+
+<ResponseField name="end" type="int">
+  Zero-based character index one past the last character of the span (Python slice convention: `text[start:end]`).
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The exact substring of the input matched by this span. Equivalent to `result.text[span.start:span.end]`.
+</ResponseField>
+
+<ResponseField name="placeholder" type="str">
+  The string that replaces this span in `redacted_text`. Defaults to `<REDACTED>`.
+</ResponseField>
+
+### Serialization
+
+Both `to_dict()` and `to_json()` are available on `PIIParseResult`.
+
+```python
+result.to_dict()
+# Returns a plain Python dict
+
+result.to_json(indent=2)
+# Returns a JSON string; pass indent=None for compact output
+```
+
+### Full JSON output example
+
+```python
+from pii_parser.api import PIIParser
+
+parser = PIIParser()
+result = parser.parse("Contact alice@example.com or call +1 (415) 555-0198.")
+print(result.to_json())
+```
+
+```json
+{
+  "schema_version": 1,
+  "summary": {
+    "span_counts": {
+      "private_email": 1,
+      "private_phone": 1
+    },
+    "total_spans": 2
+  },
+  "text": "Contact alice@example.com or call +1 (415) 555-0198.",
+  "detected_spans": [
+    {
+      "label": "private_email",
+      "start": 8,
+      "end": 25,
+      "text": "alice@example.com",
+      "placeholder": "<REDACTED>"
+    },
+    {
+      "label": "private_phone",
+      "start": 34,
+      "end": 51,
+      "text": "+1 (415) 555-0198",
+      "placeholder": "<REDACTED>"
+    }
+  ],
+  "redacted_text": "Contact <REDACTED> or call <REDACTED>."
+}
+```
+
+### Custom placeholder
+
+Pass `placeholder` to the `PIIParser` constructor to use a different replacement string for every span in a parse call.
+
+```python
+parser = PIIParser(placeholder="[PRIVATE]")
+result = parser.parse("Email me at alice@example.com.")
+print(result.redacted_text)
+# Email me at [PRIVATE].
+```
+
+### Summary dict structure
+
+```python
+result.summary
+# {
+#   "span_counts": {
+#     "private_email": 1,
+#     "private_phone": 1
+#   },
+#   "total_spans": 2
+# }
+```
+
+  </Tab>
+  <Tab title="HybridParseResult">
+
+## `HybridParseResult`
+
+`HybridParseResult` is returned by `HybridPIIParser.parse()` and the convenience function `parse_hybrid()`. It is a frozen dataclass defined in `hybrid.py`.
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(device="cpu")
+result = parser.parse(
+    "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), "
+    "account 40702810500001234567, 14 Beautiful Ct, Anytown USA, "
+    "password Priv4cy-Filt3r-2026."
+)
+```
+
+<Note>
+`HybridParseResult` does not include a `redacted_text` field or a `summary` field. If you need redaction, pass the `spans` into your own redaction logic, or use the `PIIParser` regex backend instead.
+</Note>
+
+### Fields
+
+<ResponseField name="text" type="str">
+  The original input text, unmodified.
+</ResponseField>
+
+<ResponseField name="spans" type="tuple[ParsedSpan, ...]">
+  An ordered tuple of detected PII spans, sorted by `start` position. These spans come from the model, the span-merger, and the regex backstop combined.
+</ResponseField>
+
+<ResponseField name="warning" type="str | None">
+  An optional warning string propagated from the underlying model parser. `None` when no warning was raised.
+</ResponseField>
+
+### `ParsedSpan` fields
+
+<ResponseField name="label" type="str">
+  One of the eight opf v2 labels.
+</ResponseField>
+
+<ResponseField name="start" type="int">
+  Zero-based character index of the first character of the span.
+</ResponseField>
+
+<ResponseField name="end" type="int">
+  Zero-based character index one past the last character of the span.
+</ResponseField>
+
+<ResponseField name="text" type="str">
+  The exact matched substring.
+</ResponseField>
+
+### Serialization
+
+```python
+result.to_dict()
+# Returns a plain Python dict
+
+result.to_json(indent=2)
+# Returns a JSON string
+```
+
+### Full JSON output example
+
+```python
+from pii_parser.hybrid import HybridPIIParser
+
+parser = HybridPIIParser(device="cpu")
+result = parser.parse(
+    "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), "
+    "account 40702810500001234567."
+)
+print(result.to_json())
+```
+
+```json
+{
+  "text": "Hi Quindle Testwick (quindle.testwick@openai.com / +1-415-555-0102), account 40702810500001234567.",
+  "spans": [
+    {
+      "label": "private_person",
+      "start": 3,
+      "end": 19,
+      "text": "Quindle Testwick"
+    },
+    {
+      "label": "private_email",
+      "start": 21,
+      "end": 47,
+      "text": "quindle.testwick@openai.com"
+    },
+    {
+      "label": "private_phone",
+      "start": 50,
+      "end": 66,
+      "text": "+1-415-555-0102"
+    },
+    {
+      "label": "account_number",
+      "start": 77,
+      "end": 97,
+      "text": "40702810500001234567"
+    }
+  ]
+}
+```
+
+  </Tab>
+</Tabs>
+
+## Iterating over spans
+
+Regardless of which result type you receive, you can iterate over spans the same way:
+
+```python
+for span in result.spans:        # HybridParseResult
+    print(f"{span.label:18}  {span.text}")
+
+for span in result.detected_spans:   # PIIParseResult
+    print(f"{span.label:18}  {span.text}")
+```
+
+## Accessing the redacted text
+
+`redacted_text` is only available on `PIIParseResult`. It is built by walking the detected spans in order and replacing each character range with the span's `placeholder`:
+
+```python
+result = PIIParser().parse("Email alice@example.com for help.")
+print(result.redacted_text)
+# Email <REDACTED> for help.
+```
